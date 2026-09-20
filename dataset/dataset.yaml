@@ -1,0 +1,22 @@
+train: ../generation/train.txt
+val: ../generation/val.txt
+
+names:
+  0: 6B
+  1: 6R
+  2: 7B
+  3: 7R
+  4: 8B
+  5: 8R
+  6: 9B
+  7: 9R
+  8: 10B
+  9: 10R
+  10: AB
+  11: AR
+  12: JB
+  13: JR
+  14: KB
+  15: KR
+  16: QB
+  17: QR

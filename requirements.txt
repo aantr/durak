@@ -1,0 +1,10 @@
+ultralytics
+tensorrt
+onnxruntime-gpu
+nvidia-modelopt
+onnx_graphsurgeon
+onnx
+onnxscript
+onnxruntime
+lief
+polygraphy

@@ -4,12 +4,16 @@
 
 - backgrounds всегда внутри --dataset (папка dataset/backgrounds)
 - размер выходного изображения = размер выбранного фона
-- объекты классов вставляются с исходным размером (с возможностью поворота)
+- объекты классов вставляются с исходным размером (с возможностью поворота и масштаба)
 - в аннотации попадают ТОЛЬКО классы, перечисленные в --yaml
 - классы из dataset, которых нет в yaml, тоже загружаются, но не размечаются
 - --weights: коэффициенты "размечивания" классов (влияют на частоту выбора)
 - --max-angle: максимальный угол поворота (общий или per-class)
+- --scale / --scale-per-class: диапазон масштабирования (min,max) для классов
 - --background-items: классы, которые размещаются ПЕРВЫМИ на фоне
+  (например: tree,grass). Остальные объекты рисуются ПОСЛЕ них и могут
+  перекрывать их сверху. Классы из background-items НЕ выбираются
+  случайно в качестве foreground-объектов.
 - генерируется generation/dataset.yaml
 
 Пример:
@@ -23,6 +27,7 @@
         --weights "cat=3;dog=1;tree=0.5" \
         --max-angle 30 \
         --max-angle-per-class "cat=15;tree=180" \
+        --scale "cat=0.7,1.3;dog=0.5,1.0" \
         --background-items "tree,grass" \
         --objects-per-image 4 \
         --val-split 0.2 \
@@ -69,6 +74,37 @@ def parse_area_list(s: str):
             )
         name, coords = chunk.split("=", 1)
         result[name.strip()] = parse_area(coords)
+    return result
+
+
+def parse_scale(s: str):
+    """'0.5,1.5' -> (0.5, 1.5)"""
+    parts = [float(x) for x in s.split(",")]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("ожидается 'min,max'")
+    lo, hi = parts
+    if lo <= 0 or hi <= 0:
+        raise argparse.ArgumentTypeError("scale должен быть > 0")
+    if lo > hi:
+        lo, hi = hi, lo
+    return (lo, hi)
+
+
+def parse_scale_list(s: str):
+    """'cat=0.5,1.5;dog=1.0,1.0' -> {'cat': (0.5,1.5), 'dog': (1.0,1.0)}"""
+    result = {}
+    if not s:
+        return result
+    for chunk in s.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise argparse.ArgumentTypeError(
+                f"Неверный формат scale: '{chunk}', ожидается class=min,max"
+            )
+        name, coords = chunk.split("=", 1)
+        result[name.strip()] = parse_scale(coords)
     return result
 
 
@@ -206,7 +242,20 @@ def load_objects(dataset_dir: Path, class_names):
     return objects
 
 
-# ---------- поворот ----------
+# ---------- трансформации ----------
+
+def scale_object(img, mask, scale):
+    """Масштабирует объект и маску с сохранением пропорций."""
+    if abs(scale - 1.0) < 1e-3:
+        return img, mask
+    h, w = img.shape[:2]
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    img_s = cv2.resize(img, (new_w, new_h), interpolation=interp)
+    mask_s = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+    return img_s, mask_s
+
 
 def rotate_object(img, mask, angle_deg):
     """Поворачивает объект и маску вокруг центра. Возвращает обрезанные по маске."""
@@ -214,10 +263,8 @@ def rotate_object(img, mask, angle_deg):
         return img, mask
     h, w = img.shape[:2]
     cx, cy = w / 2.0, h / 2.0
-    # Диагональ, чтобы не потерять углы
     diag = int(np.ceil(np.sqrt(w * w + h * h)))
     M = cv2.getRotationMatrix2D((cx, cy), angle_deg, 1.0)
-    # Сдвигаем в новый центр
     M[0, 2] += diag / 2 - cx
     M[1, 2] += diag / 2 - cy
 
@@ -233,7 +280,6 @@ def rotate_object(img, mask, angle_deg):
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     )
-    # Обрезаем по маске
     img_c, mask_c = crop_to_mask(img_r, mask_r)
     if img_c is None:
         return img, mask
@@ -327,9 +373,18 @@ def main():
     ap.add_argument("--max-angle-per-class", type=parse_angles, default={},
                     help="Максимальный угол по классам: 'cat=15;tree=180'. "
                          "Переопределяет --max-angle.")
+    ap.add_argument("--scale", type=parse_scale, default=(1.0, 1.0),
+                    help="Общий диапазон масштаба: 'min,max' (например 0.5,1.5). "
+                         "По умолчанию 1.0,1.0 (без изменений).")
+    ap.add_argument("--scale-per-class", type=parse_scale_list, default={},
+                    help="Диапазон масштаба по классам: "
+                         "'cat=0.7,1.3;dog=0.5,1.0'. Переопределяет --scale.")
     ap.add_argument("--background-items", type=parse_csv_list, default=[],
                     help="Классы, которые размещаются ПЕРВЫМИ на фоне "
-                         "(например: tree,grass). Через запятую.")
+                         "(например: tree,grass). Через запятую. "
+                         "Остальные объекты рисуются ПОСЛЕ и могут "
+                         "перекрывать их сверху. Эти классы НЕ выбираются "
+                         "случайно в качестве foreground-объектов.")
     ap.add_argument("--val-split", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -365,25 +420,32 @@ def main():
         print("[!] Нет ни одного объекта. Выход.")
         sys.exit(1)
 
-    # 3. Веса
-    weights = {c: max(0.0, args.weights.get(c, 1.0)) for c in available}
-    # Классы с нулевым весом выкидываем из выборки
-    weighted_available = [c for c in available if weights[c] > 0]
-    if not weighted_available:
-        print("[!] Все веса нулевые. Использую равномерное распределение.")
-        weighted_available = available
-        weights = {c: 1.0 for c in available}
-    w_list = [weights[c] for c in weighted_available]
-    print("Веса классов: " + ", ".join(
-        f"{c}={weights[c]:g}" for c in weighted_available))
-
-    # 4. Background-items: только те, что есть среди available
+    # 3. Background-items (только те, что реально есть в dataset)
     bg_items = [c for c in args.background_items if c in available]
     unknown_bg_items = [c for c in args.background_items if c not in available]
     if unknown_bg_items:
         print(f"[!] background-items не найдены в dataset: {unknown_bg_items}")
     if bg_items:
-        print(f"Background-items (первыми): {bg_items}")
+        print(f"Background-items (первыми, остальные поверх них): {bg_items}")
+
+    # 4. Веса (foreground: исключаем background-items из случайного выбора)
+    fg_available = [c for c in available if c not in bg_items]
+    if not fg_available:
+        print("[!] Нет foreground-классов (все ушли в background-items). "
+              "Будут использоваться только background-items.")
+        fg_available = []
+
+    weights = {c: max(0.0, args.weights.get(c, 1.0)) for c in fg_available}
+    weighted_fg = [c for c in fg_available if weights[c] > 0]
+    if fg_available and not weighted_fg:
+        print("[!] Все веса foreground-классов нулевые. "
+              "Использую равномерное распределение.")
+        weighted_fg = fg_available
+        weights = {c: 1.0 for c in fg_available}
+    w_list = [weights[c] for c in weighted_fg]
+    if weighted_fg:
+        print("Веса foreground-классов: " + ", ".join(
+            f"{c}={weights[c]:g}" for c in weighted_fg))
 
     # 5. Углы
     def get_max_angle(cls):
@@ -396,6 +458,18 @@ def main():
             f"{k}={v:g}" for k, v in args.max_angle_per_class.items()))
     if args.max_angle:
         print(f"Общий макс. угол: {args.max_angle:g}")
+
+    # 5b. Масштабы
+    def get_scale_range(cls):
+        if cls in args.scale_per_class:
+            return args.scale_per_class[cls]
+        return args.scale
+
+    if args.scale_per_class:
+        print("Масштаб по классам: " + ", ".join(
+            f"{k}={v[0]:g}..{v[1]:g}" for k, v in args.scale_per_class.items()))
+    if args.scale != (1.0, 1.0):
+        print(f"Общий масштаб: {args.scale[0]:g}..{args.scale[1]:g}")
 
     # 6. Фоны
     bg_files = list_images(backgrounds_dir)
@@ -421,25 +495,31 @@ def main():
         labels = []
         n_objects = random.randint(1, max(1, args.objects_per_image))
 
-        # Формируем порядок классов: сначала background-items, потом остальные
-        chosen = []
-        # background-items: стараемся поставить каждый по разу (если есть)
-        for c in bg_items:
-            chosen.append(c)
-        # Остальные — случайно по весам
-        remaining = max(0, n_objects - len(chosen))
-        for _ in range(remaining):
-            chosen.append(weighted_choice(weighted_available, w_list))
+        # --- Формируем порядок вставки ---
+        # 1) background-items: каждый по одному разу, ВСЕГДА первыми (снизу)
+        bg_chosen = list(bg_items)
 
-        # Перемешаем только "остальные" (background-items остаются первыми
-        # в том порядке, в котором переданы)
-        head = chosen[:len(bg_items)]
-        tail = chosen[len(bg_items):]
-        random.shuffle(tail)
-        chosen = head + tail
+        # 2) foreground: остальные объекты, поверх background-items
+        #    (background-items исключены из случайного выбора)
+        remaining = max(0, n_objects - len(bg_chosen))
+        fg_chosen = []
+        if weighted_fg:
+            for _ in range(remaining):
+                fg_chosen.append(weighted_choice(weighted_fg, w_list))
+        random.shuffle(fg_chosen)
+
+        # Порядок вставки: сначала все background-items, потом foreground.
+        # Так background-items гарантированно оказываются ПОД остальными.
+        chosen = bg_chosen + fg_chosen
 
         for cls in chosen:
             img_c, mask_c = random.choice(objects[cls])
+
+            # Масштаб
+            lo, hi = get_scale_range(cls)
+            if (lo, hi) != (1.0, 1.0) and hi > 0:
+                scale = random.uniform(lo, hi)
+                img_c, mask_c = scale_object(img_c, mask_c, scale)
 
             # Поворот
             max_ang = get_max_angle(cls)
@@ -489,7 +569,7 @@ def main():
             cx, cy, bw, bh = to_yolo(bx, W, H)
             labels.append(f"{name_to_id[cls]} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
 
-        base = f"gen_{i:03d}"
+        base = f"gen_cards_{i:03d}"
         img_path = out_dir / f"{base}.png"
         lbl_path = out_dir / f"{base}.txt"
 

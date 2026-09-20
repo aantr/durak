@@ -2,6 +2,7 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+from constants import IMAGE_SIZE
 
 DIR = Path(__file__).resolve().parents[1]
 DATA_CONFIG = DIR / "dataset" / "dataset.yaml"
@@ -24,26 +25,27 @@ def main():
     #
     # Новые P2-слои останутся случайно инициализированными,
     # остальные совместимые веса будут перенесены.
+
     model.load(str(PRETRAINED_WEIGHTS))
 
     model.train(
         data=str(DATA_CONFIG),
 
         # Для мелких объектов я бы начал с 1280.
-        imgsz=1280,
+        imgsz=IMAGE_SIZE,
 
-        epochs=150,
+        epochs=50,
 
         # начни с 8, потом попробуй 12/16,
         # если хватает VRAM.
-        batch=8,
+        batch=16,
 
         device=0,
 
         workers=8,
 
         # Не останавливать обучение слишком рано
-        patience=35,
+        # patience=35,
 
         # кешировать датасет, если позволяет RAM
         cache="disk",
@@ -52,15 +54,15 @@ def main():
         amp=True,
 
         # augmentation
-        hsv_h=0.010,
-        hsv_s=0.40,
-        hsv_v=0.30,
+        # hsv_h=0.010,
+        # hsv_s=0.40,
+        # hsv_v=0.30,
 
         translate=0.08,
         scale=0.40,
 
-        fliplr=0.0,
-        flipud=0.0,
+        # fliplr=0.0,
+        # flipud=0.0,
 
         # Для игры геометрические деформации
         # обычно лучше держать небольшими.
@@ -74,7 +76,7 @@ def main():
         close_mosaic=15,
 
         project=str(PROJECT_DIR),
-        name="yolo26s_p2_1280",
+        name="yolo26s_p2",
 
         save=True,
         plots=True,

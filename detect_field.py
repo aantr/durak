@@ -29,21 +29,21 @@ def crop_by_size(img, crop):
 
 
 # Загружаем engine
-model = YOLO(str(DETECTION_ENGINE_PATH))
-# model = YOLO(str(DETECTION_FIELD_ENGINE_PATH))
+# model = YOLO(str(DETECTION_ENGINE_PATH))
+model = YOLO(str(DETECTION_FIELD_ENGINE_PATH))
 
 
 img = cv2.imread(source)
 # img = cv2.resize(img, (1280, 1280))
 
 # Обрезаем ДО подачи в модель
-img = crop_by_size(img, CROP_CARDS)
-# img = crop_by_size(img, CROP_FIELD)
+# img = crop_by_size(img, CROP_CARDS)
+img = crop_by_size(img, CROP_FIELD)
 
 results = model.predict(
     source=img,
-    imgsz=IMAGE_SIZE,        # ВАЖНО: должно совпадать с тем, на чём экспортировали engine
-    # imgsz=IMAGE_SIZE_FIELD,        # ВАЖНО: должно совпадать с тем, на чём экспортировали engine
+    # imgsz=IMAGE_SIZE,        # ВАЖНО: должно совпадать с тем, на чём экспортировали engine
+    imgsz=IMAGE_SIZE_FIELD,        # ВАЖНО: должно совпадать с тем, на чём экспортировали engine
     conf=0.5,
     iou=0.45,
     save=False,        # сохранить в runs/detect/predict*/

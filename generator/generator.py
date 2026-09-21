@@ -7,13 +7,15 @@
 - объекты классов вставляются с исходным размером (с возможностью поворота и масштаба)
 - в аннотации попадают ТОЛЬКО классы, перечисленные в --yaml
 - классы из dataset, которых нет в yaml, тоже загружаются, но не размечаются
-- --weights: коэффициенты "размечивания" классов (влияют на частоту выбора)
+- --weights: коэффициенты частоты выбора классов (влияют на частоту).
+  Теперь применяются и к background-items тоже.
 - --max-angle: максимальный угол поворота (общий или per-class)
 - --scale / --scale-per-class: диапазон масштабирования (min,max) для классов
 - --background-items: классы, которые размещаются ПЕРВЫМИ на фоне
   (например: tree,grass). Остальные объекты рисуются ПОСЛЕ них и могут
-  перекрывать их сверху. Классы из background-items НЕ выбираются
-  случайно в качестве foreground-объектов.
+  перекрывать их сверху. Классы из background-items МОГУТ выбираться
+  случайно (с учётом весов) наравне с остальными, но всегда кладутся
+  в нижний слой.
 - генерируется generation/dataset.yaml
 
 Пример:
@@ -24,7 +26,7 @@
         --num-images 500 \
         --area 0.1,0.1,0.9,0.9 \
         --area-per-class "cat=0.05,0.05,0.45,0.45;dog=0.55,0.55,0.95,0.95" \
-        --weights "cat=3;dog=1;tree=0.5" \
+        --weights "cat=3;dog=1;tree=2;grass=4" \
         --max-angle 30 \
         --max-angle-per-class "cat=15;tree=180" \
         --scale "cat=0.7,1.3;dog=0.5,1.0" \
@@ -365,8 +367,9 @@ def main():
     ap.add_argument("--objects-per-image", type=int, default=3,
                     help="Макс. количество объектов на изображение")
     ap.add_argument("--weights", type=parse_weights, default={},
-                    help="Коэффициенты частоты классов: 'cat=3;dog=1'. "
-                         "Чем больше — тем чаще класс выбирается для генерации.")
+                    help="Коэффициенты частоты классов: 'cat=3;dog=1;tree=2'. "
+                         "Чем больше — тем чаще класс выбирается для генерации. "
+                         "Применяется и к background-items.")
     ap.add_argument("--max-angle", type=float, default=0.0,
                     help="Общий максимальный угол поворота (град). "
                          "Случайный угол в [-max, max].")
@@ -383,8 +386,9 @@ def main():
                     help="Классы, которые размещаются ПЕРВЫМИ на фоне "
                          "(например: tree,grass). Через запятую. "
                          "Остальные объекты рисуются ПОСЛЕ и могут "
-                         "перекрывать их сверху. Эти классы НЕ выбираются "
-                         "случайно в качестве foreground-объектов.")
+                         "перекрывать их сверху. Эти классы МОГУТ выбираться "
+                         "случайно (с учётом весов), но всегда кладутся "
+                         "в нижний слой.")
     ap.add_argument("--val-split", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
@@ -416,6 +420,9 @@ def main():
     objects = load_objects(dataset_dir, dataset_classes)
 
     available = [c for c in dataset_classes if objects.get(c)]
+    missing = [c for c in dataset_classes if not objects.get(c)]
+    if missing:
+        print(f"[!] Классы без объектов (будут проигнорированы): {missing}")
     if not available:
         print("[!] Нет ни одного объекта. Выход.")
         sys.exit(1)
@@ -426,26 +433,18 @@ def main():
     if unknown_bg_items:
         print(f"[!] background-items не найдены в dataset: {unknown_bg_items}")
     if bg_items:
-        print(f"Background-items (первыми, остальные поверх них): {bg_items}")
+        print(f"Background-items (нижний слой, веса учитываются): {bg_items}")
 
-    # 4. Веса (foreground: исключаем background-items из случайного выбора)
-    fg_available = [c for c in available if c not in bg_items]
-    if not fg_available:
-        print("[!] Нет foreground-классов (все ушли в background-items). "
-              "Будут использоваться только background-items.")
-        fg_available = []
-
-    weights = {c: max(0.0, args.weights.get(c, 1.0)) for c in fg_available}
-    weighted_fg = [c for c in fg_available if weights[c] > 0]
-    if fg_available and not weighted_fg:
-        print("[!] Все веса foreground-классов нулевые. "
-              "Использую равномерное распределение.")
-        weighted_fg = fg_available
-        weights = {c: 1.0 for c in fg_available}
-    w_list = [weights[c] for c in weighted_fg]
-    if weighted_fg:
-        print("Веса foreground-классов: " + ", ".join(
-            f"{c}={weights[c]:g}" for c in weighted_fg))
+    # 4. Веса (теперь для ВСЕХ классов, включая background-items)
+    weights = {c: max(0.0, args.weights.get(c, 1.0)) for c in available}
+    weighted_all = [c for c in available if weights[c] > 0]
+    if not weighted_all:
+        print("[!] Все веса нулевые. Использую равномерное распределение.")
+        weighted_all = available
+        weights = {c: 1.0 for c in available}
+    w_list = [weights[c] for c in weighted_all]
+    print("Веса классов: " + ", ".join(
+        f"{c}={weights[c]:g}" for c in weighted_all))
 
     # 5. Углы
     def get_max_angle(cls):
@@ -495,22 +494,25 @@ def main():
         labels = []
         n_objects = random.randint(1, max(1, args.objects_per_image))
 
-        # --- Формируем порядок вставки ---
-        # 1) background-items: каждый по одному разу, ВСЕГДА первыми (снизу)
-        bg_chosen = list(bg_items)
+        # --- Выбор классов с учётом весов ---
+        # Каждый слот тянется из общего распределения по весам
+        # (background-items тоже участвуют).
+        chosen_all = []
+        for _ in range(n_objects):
+            chosen_all.append(weighted_choice(weighted_all, w_list))
 
-        # 2) foreground: остальные объекты, поверх background-items
-        #    (background-items исключены из случайного выбора)
-        remaining = max(0, n_objects - len(bg_chosen))
-        fg_chosen = []
-        if weighted_fg:
-            for _ in range(remaining):
-                fg_chosen.append(weighted_choice(weighted_fg, w_list))
-        random.shuffle(fg_chosen)
+        # Разделяем на слои:
+        # - bg_layer: классы из --background-items (кладутся первыми, снизу)
+        # - fg_layer: все остальные (кладутся вторыми, сверху)
+        bg_layer = [c for c in chosen_all if c in bg_items]
+        fg_layer = [c for c in chosen_all if c not in bg_items]
 
-        # Порядок вставки: сначала все background-items, потом foreground.
-        # Так background-items гарантированно оказываются ПОД остальными.
-        chosen = bg_chosen + fg_chosen
+        # Внутри слоёв перемешиваем, чтобы порядок наложения был случайным
+        random.shuffle(bg_layer)
+        random.shuffle(fg_layer)
+
+        # Итоговый порядок вставки: сначала нижний слой, потом верхний
+        chosen = bg_layer + fg_layer
 
         for cls in chosen:
             img_c, mask_c = random.choice(objects[cls])
@@ -569,7 +571,7 @@ def main():
             cx, cy, bw, bh = to_yolo(bx, W, H)
             labels.append(f"{name_to_id[cls]} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
 
-        base = f"gen_cards_{i:03d}"
+        base = f"gen_cards0_{i:03d}"
         img_path = out_dir / f"{base}.png"
         lbl_path = out_dir / f"{base}.txt"
 

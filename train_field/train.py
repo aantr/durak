@@ -2,12 +2,12 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
-from constants import IMAGE_SIZE
+from constants import IMAGE_SIZE_FIELD
 
 DIR = Path(__file__).resolve().parents[1]
-DATA_CONFIG = DIR / "generation" / "dataset.yaml"
+DATA_CONFIG = DIR / "generation_field" / "dataset.yaml"
 PRETRAINED_WEIGHTS = DIR / "yolo26s.pt"
-PROJECT_DIR = DIR / "runs" / "detect" / "runs_cards"
+PROJECT_DIR = DIR / "runs" / "detect" / "runs_field"
 
 
 def main():
@@ -32,7 +32,7 @@ def main():
         data=str(DATA_CONFIG),
 
         # Для мелких объектов я бы начал с 1280.
-        imgsz=IMAGE_SIZE,
+        imgsz=IMAGE_SIZE_FIELD,
 
         epochs=100,
 

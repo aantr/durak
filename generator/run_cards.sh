@@ -1,1 +1,1 @@
-python generator/generator.py --dataset dataset --yaml dataset/dataset.yaml --output generation --num-images 1000 --objects-per-image 35 --weights "card=5;bubi=4;heart=4;kresti=4;piki=4" --max-angle 20 --background-items card
+python generator/generator.py --dataset dataset --yaml dataset/dataset.yaml --output generation --num-images 1000 --objects-per-image 35 --weights "card=10;bubi=4;heart=4;kresti=4;piki=4;images=4" --max-angle 20 --background-items card,images

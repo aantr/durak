@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from constants import DETECTION_ENGINE_PATH, CROP_CARDS, IMAGE_SIZE, CROP_FIELD, DETECTION_FIELD_ENGINE_PATH, IMAGE_SIZE_FIELD
 
 # Источник: путь к картинке, папке, видео или 0 для вебки
-source = "screenshots/IMG_1405.PNG"
+source = "screenshots/IMG_1412.PNG"
 
 def crop_by_size(img, crop):
     """Обрезает изображение по crop, если для его размера есть правило."""

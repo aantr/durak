@@ -108,6 +108,8 @@ def main():
     img_vis = img.copy()
 
     boxes = []
+
+    # x \in avail: x = 'simple' - карта снизу, x != 'simple' - карта положена на карту x
     avail = []
     for b in r.boxes:
         x1, y1, x2, y2 = b.xyxy[0].cpu().numpy().astype(int)

@@ -1,8 +1,11 @@
 from pathlib import Path
 
 from ultralytics import YOLO
+import sys
+import os
 
-from constants import IMAGE_SIZE_SUIT
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from constants.constants import IMAGE_SIZE_SUIT
 
 DIR = Path(__file__).resolve().parents[1]
 PROJECT_DIR = DIR / "runs" / "cls" / "runs_suit"

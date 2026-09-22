@@ -1,8 +1,11 @@
 from pathlib import Path
 
 from ultralytics import YOLO
+import sys
+import os
 
-from constants import IMAGE_SIZE_FIELD
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from constants.constants import IMAGE_SIZE_FIELD
 
 DIR = Path(__file__).resolve().parents[1]
 DATA_CONFIG = DIR / "generation_field" / "dataset.yaml"

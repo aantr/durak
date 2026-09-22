@@ -13,7 +13,7 @@ from constants import (
     AREA_SHIFT, CLASSIFY_SUIT_WEIGHTS_PATH, IMAGE_SIZE_SUIT,
 )
 
-source = "screenshots/IMG_1412.PNG"
+source = "screenshots/IMG_1417.PNG"
 
 # Показывать область, которая подаётся в классификатор масти
 SHOW_CLS_AREA = True

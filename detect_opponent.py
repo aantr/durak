@@ -1,15 +1,15 @@
 """
-Обрезка изображения по CROP_DEQUE_LOST_CARDS и распознавание текста
+Обрезка изображения по CROP_OPPONENT и распознавание текста
 с помощью PaddleOCR (GPU).
 """
 
 import cv2
 from paddleocr import PaddleOCR
 
-from constants import CROP_DEQUE_LOST_CARDS
+from constants import CROP_OPPONENT
 
 # --- путь к изображению ---
-SOURCE = "screenshots/IMG_1417.PNG"
+SOURCE = "screenshots/IMG_1408.PNG"
 
 
 def crop_by_size(img, crop):
@@ -34,7 +34,7 @@ def main():
     if img is None:
         raise FileNotFoundError(f"Не удалось открыть: {SOURCE}")
 
-    img = crop_by_size(img, CROP_DEQUE_LOST_CARDS)
+    img = crop_by_size(img, CROP_OPPONENT)
 
     # --- 2. Инициализируем PaddleOCR на GPU (PaddleOCR 3.x) ---
     ocr = PaddleOCR(

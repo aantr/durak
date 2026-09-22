@@ -14,7 +14,7 @@ from constants import (
 )
 
 # Источник: путь к картинке, папке, видео или 0 для вебки
-source = "screenshots/IMG_1408.PNG"
+source = "screenshots/IMG_1417.PNG"
 
 SHOW_CLS_AREA = True
 SHOW_CLS_CROP_WINDOW = False

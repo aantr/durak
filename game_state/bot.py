@@ -5,9 +5,10 @@
     python -m game_state.bot --mac-ip 10.10.10.1 --fps 10
     python -m game_state.bot --draw-detections
     python -m game_state.bot --no-window
+    python -m game_state.bot --suggest-moves --trump S
 
 Esc/Q или Ctrl+C — выход. Клик по окну передаётся на iPhone.
-Автоматический выбор и выполнение ходов здесь пока не реализованы.
+Подсказки включаются через --suggest-moves; автоматического выполнения ходов нет.
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from game_state.game import DurakGameState, RANKS, SUITS
 
 if TYPE_CHECKING:
     from iphone_screen.iphone_client_v2 import IPhoneRemote
+    from game_engine import DurakEngine
 
 
 MAC_IP = "10.10.10.1"
@@ -126,6 +128,23 @@ def format_state(snapshot: dict, *, width: int = 80, color: bool = False) -> str
     separator()
     row(f"Известные карты соперника [{len(snapshot['known_opponent_cards'])}]:  " + cards(snapshot["known_opponent_cards"]))
     row(f"Бита [{len(snapshot['out_cards'])}]:  " + cards(snapshot["out_cards"]))
+    recommendation = snapshot.get("recommendation")
+    if recommendation:
+        separator()
+        if recommendation.get("status") == "ok":
+            action = recommendation["action"]
+            if action["type"] == "defend":
+                description = f"Отбить {card(action['target_card'])} картой {card(action['card'])}"
+            elif action["type"] == "attack":
+                verb = "Подкинуть" if snapshot["phase"] == "throw_in" else "Походить"
+                description = f"{verb} {card(action['card'])}"
+            else:
+                description = {"take": "Взять карты", "pass": "Больше не подкидывать / завершить атаку"}[action["type"]]
+            row("MCTS: " + description)
+            value = recommendation["moves"][0]["value"]
+            row(f"Оценка {value:.3f} · {recommendation['iterations']} симуляций · {recommendation['elapsed_ms']:.0f} мс")
+        else:
+            row("MCTS: " + recommendation["reason"])
     separator()
     unknown = snapshot["unknown_opponent_cards"]
     row(f"Неустановленные карты [{len(unknown)}] · колода / соперник")
@@ -172,6 +191,7 @@ def run_bot(
     show_window: bool = True,
     draw_detections: bool = False,
     state_format: str = "pretty",
+    engine: DurakEngine | None = None,
 ) -> DurakGameState:
     """Читает новые кадры до Esc/Q, закрытия окна или Ctrl+C.
 
@@ -189,6 +209,26 @@ def run_bot(
         raise ValueError("state_format должен быть pretty или json")
     if state is None:
         state = DurakGameState()
+
+    cached_engine_snapshot = None
+    cached_recommendation = None
+
+    def update_state(frame):
+        nonlocal cached_engine_snapshot, cached_recommendation
+        if draw_detections:
+            state.update(frame, draw_detections=True)
+        else:
+            state.update(frame)
+        if engine is None:
+            return None
+        current = state_snapshot(state)
+        if current != cached_engine_snapshot:
+            try:
+                cached_recommendation = engine.suggest(state)
+            except ValueError as exc:
+                cached_recommendation = {"status": "invalid_state", "reason": str(exc), "action": None}
+            cached_engine_snapshot = current
+        return cached_recommendation
 
     def tap_done(future: Future) -> None:
         try:
@@ -223,13 +263,15 @@ def run_bot(
             # Только этот worker изменяет state. Читаем его после завершения
             # Future и до постановки следующего кадра, чтобы избежать гонок.
             if pending is not None and pending.done():
-                pending.result()  # Ошибка модели должна быть видна вызывающему коду.
+                recommendation = pending.result()  # Ошибки вычислений не скрываем.
                 pending = None
                 if draw_detections:
                     annotated_frame = state.annotated_frame
                     if show_window and annotated_frame is not None:
                         cv2.imshow(WINDOW_NAME, annotated_frame)
                 snapshot = state_snapshot(state)
+                if recommendation is not None:
+                    snapshot["recommendation"] = recommendation
                 if snapshot != previous_snapshot:
                     if state_format == "json":
                         logger.info("Состояние: %s", json.dumps(snapshot, ensure_ascii=False))
@@ -256,10 +298,7 @@ def run_bot(
                 if pending is None and now >= next_update:
                     # Передаём отдельный BGR-кадр; отображение и декодер
                     # не могут изменить изображение во время распознавания.
-                    if draw_detections:
-                        pending = worker.submit(state.update, frame.copy(), draw_detections=True)
-                    else:
-                        pending = worker.submit(state.update, frame.copy())
+                    pending = worker.submit(update_state, frame.copy())
                     next_update = now + 1.0 / fps
                 if show_window and (not draw_detections or annotated_frame is None):
                     cv2.imshow(WINDOW_NAME, frame)
@@ -296,12 +335,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-window", action="store_true", help="Только вывод состояния в консоль")
     parser.add_argument("--draw-detections", action="store_true", help="Вставлять размеченные кропы всех детекторов обратно в кадр")
     parser.add_argument("--state-format", choices=("pretty", "json"), default="pretty", help="Формат состояния в консоли (по умолчанию pretty)")
+    parser.add_argument("--suggest-moves", action="store_true", help="Подсказки C++ MCTS без автоматических ходов")
+    parser.add_argument("--trump", choices=("C", "D", "H", "S"), help="Козырь: C=крести, D=бубны, H=червы, S=пики")
+    parser.add_argument("--trump-card", help="Известная нижняя карта колоды, например 6S")
+    parser.add_argument("--mcts-ms", type=float, default=250, help="Бюджет поиска в мс (0 — только лимит итераций)")
+    parser.add_argument("--mcts-iterations", type=int, default=3000, help="Максимум симуляций MCTS на состояние")
     args = parser.parse_args(argv)
     if not math.isfinite(args.fps) or not 5 <= args.fps <= 60:
         parser.error("--fps должен быть в диапазоне от 5 до 60")
+    if args.suggest_moves and args.trump is None:
+        parser.error("Для --suggest-moves укажите --trump: бот пока не распознаёт козырь")
+    if not math.isfinite(args.mcts_ms) or args.mcts_ms < 0 or not 1 <= args.mcts_iterations <= 10000000:
+        parser.error("--mcts-ms должен быть >= 0, --mcts-iterations — от 1 до 10000000")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
+        engine = None
+        if args.suggest_moves:
+            from game_engine import DurakEngine
+            engine = DurakEngine(args.trump, bottom_trump=args.trump_card,
+                                 iterations=args.mcts_iterations, time_limit_ms=args.mcts_ms)
         from iphone_screen.iphone_client_v2 import IPhoneRemote
 
         with IPhoneRemote(
@@ -309,7 +362,8 @@ def main(argv: list[str] | None = None) -> int:
             control_port=args.control_port,
             video_port=args.video_port,
         ) as iphone:
-            run_bot(iphone, fps=args.fps, show_window=not args.no_window, draw_detections=args.draw_detections, state_format=args.state_format)
+            run_bot(iphone, fps=args.fps, show_window=not args.no_window, draw_detections=args.draw_detections,
+                    state_format=args.state_format, engine=engine)
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C")
     except Exception:

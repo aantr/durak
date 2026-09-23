@@ -1,0 +1,13 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "durak-game-engine"
+version = "0.1.0"
+description = "36-card two-player Durak rules and information-set MCTS"
+requires-python = ">=3.10"
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = []

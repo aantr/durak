@@ -35,15 +35,14 @@ def _card_code(card: Any) -> str | None:
     """Нормализует карту к формату ``8H``/``10S``."""
     if isinstance(card, Mapping):
         if card.get("rank") is not None and card.get("suit") is not None:
-            card = f"{card['rank']}{card['suit']}"
+            card = (card["rank"], card["suit"])
         else:
             card = card.get("card", card.get("name"))
-    elif isinstance(card, (tuple, list)) and len(card) >= 2:
+    if isinstance(card, (tuple, list)) and len(card) >= 2:
         # Детектор ранга обучен на именах наподобие ``8R`` и ``8B``;
         # цвет там избыточен, поскольку точную масть даёт классификатор.
         rank = re.match(r"10|[6-9JQKA]", str(card[0]).upper())
-        suit_names = {"clubs": "C", "club": "C", "kresti": "C", "diamonds": "D", "diamond": "D", "bubi": "D", "hearts": "H", "heart": "H", "piki": "S", "spades": "S", "spade": "S"}
-        suit = suit_names.get(normalize_text(card[1]), card[1])
+        suit = _normalise_suit(card[1])
         card = f"{rank.group() if rank else card[0]}{suit}"
     if not isinstance(card, str):
         return None
@@ -129,7 +128,14 @@ def _default_deque(image: np.ndarray, *, visualization=None) -> int | None:
 
 
 def _normalise_suit(suit: Any) -> str:
-    names = {"clubs": "C", "club": "C", "kresti": "C", "diamonds": "D", "diamond": "D", "bubi": "D", "hearts": "H", "heart": "H", "piki": "S", "spades": "S", "spade": "S"}
+    # В текущем обучающем датасете clubs содержит пики, spades — крести.
+    # Исправляем имена классов модели; канонические C/♣ и S/♠ не меняем.
+    names = {
+        "clubs": "S", "club": "S", "piki": "S",
+        "spades": "C", "spade": "C", "kresti": "C",
+        "diamonds": "D", "diamond": "D", "bubi": "D",
+        "hearts": "H", "heart": "H",
+    }
     return names.get(normalize_text(suit), str(suit or ""))
 
 

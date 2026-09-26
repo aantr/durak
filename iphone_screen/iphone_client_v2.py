@@ -290,20 +290,35 @@ class IPhoneRemote:
         x2: float,
         y2: float,
         duration: float = 0.1,
+        *,
+        frame_size: tuple[int, int] | None = None,
     ) -> Future:
-        """Queue a swipe using logical iOS coordinates, as in swipe().
+        """Queue a swipe; frame_size=(width, height) enables frame pixel coordinates.
 
         Returns a Future immediately. Shares the input queue with async taps;
         the RPC result or exception is available through future.result().
         """
         return self._input_executor.submit(
-            self.swipe,
+            self.swipe if frame_size is None else self._swipe_from_frame,
             float(x1),
             float(y1),
             float(x2),
             float(y2),
             float(duration),
+            *((frame_size,) if frame_size is not None else ()),
         )
+
+    def _swipe_from_frame(self, x1, y1, x2, y2, duration, frame_size):
+        frame_w, frame_h = frame_size
+        if frame_w <= 0 or frame_h <= 0:
+            raise ValueError("frame_size must be positive")
+        if self._screen_width is None or self._screen_height is None:
+            self._refresh_device_info()
+        screen_w, screen_h = self._screen_width, self._screen_height
+        if (frame_w > frame_h) != (screen_w > screen_h):
+            screen_w, screen_h = screen_h, screen_w
+        return self.swipe(x1 * screen_w / frame_w, y1 * screen_h / frame_h,
+                          x2 * screen_w / frame_w, y2 * screen_h / frame_h, duration)
 
     def type_text(self, text: str) -> Any:
         return self.rpc(

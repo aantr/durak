@@ -24,7 +24,7 @@ DETECTION_FIELD_ENGINE_PATH = (
 )
 
 CLASSIFY_SUIT_WEIGHTS_PATH = (
-    DIR / "runs/cls/runs_suit/cards_suit/weights/best.pt"
+    DIR / "runs/cls/runs_suit/cards_suit-3/weights/best.pt"
 )
 
 CROP_CARDS = {
@@ -53,6 +53,10 @@ CROP_MINE = {
 
 CROP_BUTTON = {
     (1206, 2622): (50, 2622 - 275, 450, 2622 - 125)
+}
+
+CROP_TRUMP = {
+    (1206, 2622): (70, 730, 134, 794)
 }
 
 ALLOW_CARD = {

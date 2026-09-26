@@ -112,6 +112,10 @@ py::dict result_dict(const SearchResult& s) {
     result["terminal_rollouts"] = s.terminal_rollouts;
     result["cutoff_rollouts"] = s.iterations - s.terminal_rollouts;
     result["elapsed_ms"] = s.elapsed_ms;
+    result["search_mode"] = s.determinized ? "determinized" : "ismcts";
+    result["threads"] = s.threads;
+    result["deals_started"] = s.deals_started;
+    result["deals_completed"] = s.deals_completed;
     py::list moves;
     for (const auto& stat : s.moves) {
         auto d = move_dict(stat.move);
@@ -136,14 +140,22 @@ PYBIND11_MODULE(_native, m) {
         .def("validate", &State::validate)
         .def_property_readonly("winner", [](const State& s) { return s.winner; });
     m.def("analyze", [](const py::dict& observation, int iterations, double time_limit_ms,
-                         std::uint64_t seed, int rollout_depth, double exploration) {
+                         std::uint64_t seed, int rollout_depth, double exploration,
+                         int rollouts, int deals, int threads) {
         auto obs = read_observation(observation);
         SearchResult result;
         { py::gil_scoped_release release;
-          result = search(obs, iterations, time_limit_ms, seed, rollout_depth, exploration); }
-        return result_dict(result);
+          result = search(obs, iterations, time_limit_ms, seed, rollout_depth, exploration,
+                          rollouts, deals, threads); }
+        auto output = result_dict(result);
+        output["rollouts"] = rollouts > 0 ? py::cast(rollouts) : py::none();
+        output["deals_requested"] = rollouts > 0 ? deals : 0;
+        output["exploration"] = exploration;
+        output["threads_requested"] = threads;
+        return output;
     }, py::arg("observation"), py::arg("iterations") = 3000, py::arg("time_limit_ms") = 250,
-       py::arg("seed") = 0, py::arg("rollout_depth") = 256, py::arg("exploration") = 1.41421356237);
+       py::arg("seed") = 0, py::arg("rollout_depth") = 256, py::arg("exploration") = 1.41421356237,
+       py::arg("rollouts") = 0, py::arg("deals") = 1, py::arg("threads") = 1);
     m.def("sample_world", [](const py::dict& d, std::uint64_t seed) {
         auto obs = read_observation(d); obs.validate();
         std::mt19937_64 rng(seed);

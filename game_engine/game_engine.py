@@ -4,6 +4,27 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import secrets
+import math
+
+
+def validate_search_options(*, iterations=3000, time_limit_ms=250, rollout_depth=256,
+                            rollouts=None, deals=1, exploration=1.41421356237, threads=1):
+    """Проверка до запуска фонового процесса или загрузки расширения."""
+    for name, value, maximum in (("iterations", iterations, 10000000),
+                                 ("rollout_depth", rollout_depth, 10000),
+                                 ("deals", deals, 100000), ("threads", threads, 256)):
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            raise ValueError(f"{name} должен быть целым числом от 1 до {maximum}")
+    if rollouts is not None:
+        if isinstance(rollouts, bool) or not isinstance(rollouts, int) or not 1 <= rollouts <= 10000000:
+            raise ValueError("rollouts должен быть целым числом от 1 до 10000000")
+        if rollouts * deals > 10000000:
+            raise ValueError("rollouts * deals не должно превышать 10000000")
+    elif deals != 1:
+        raise ValueError("deals требует задания rollouts")
+    for name, value in (("time_limit_ms", time_limit_ms), ("exploration", exploration)):
+        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} должен быть конечным числом >= 0")
 
 
 def _native_module():
@@ -25,6 +46,12 @@ def _text(value):
     return "".join(str(value or "").split()).lower()
 
 
+def _phase(state):
+    # Pass и Bat на кнопке — доступное действие, не уже произошедшее событие.
+    button = _text(_get(state, "button_text", _get(state, "button", "")))
+    return "throw_in" if button in ("pass", "bat") else _get(state, "phase")
+
+
 def observation_from_state(
     state, *, trump: str, bottom_trump: str | None = None,
     attacker: int | None = None, turn: int | None = None,
@@ -39,7 +66,7 @@ def observation_from_state(
     восстанавливается из оставшейся руки защитника и числа уже отбитых карт;
     defender_start_count позволяет передать точное число в начале розыгрыша.
     """
-    phase = _get(state, "phase")
+    phase = _phase(state)
     if phase == "ready":
         raise ValueError("Игра ещё не началась")
     hand = sorted(_get(state, "hand_cards", ()))
@@ -79,6 +106,12 @@ def observation_from_state(
     opponent_count = _get(state, "opponent_card_count")
     if type(deck_count) is not int or type(opponent_count) is not int:
         raise ValueError("Неизвестно количество карт колоды или соперника")
+    known_opponent = sorted(_get(state, "known_opponent_cards", ()))
+    if len(known_opponent) > opponent_count:
+        raise ValueError(
+            f"Противоречие распознавания: известных карт соперника {len(known_opponent)}, "
+            f"всего по подсчёту {opponent_count}. Если не проходит — R для сброса партии"
+        )
     mine = _text(_get(state, "mine_text", _get(state, "mine", "")))
     opponent = _text(_get(state, "opponent_text", _get(state, "opponent", "")))
     if mine == "bat" or opponent == "bat":
@@ -96,7 +129,7 @@ def observation_from_state(
         raise ValueError("Некорректное число карт защитника в начале розыгрыша")
     return {
         "hand": hand,
-        "known_opponent": sorted(_get(state, "known_opponent_cards", ())),
+        "known_opponent": known_opponent,
         "discard": sorted(_get(state, "out_cards", ())),
         "table": pairs,
         "deck_count": deck_count, "opponent_count": opponent_count,
@@ -109,28 +142,43 @@ def observation_from_state(
 
 
 class DurakEngine:
-    """Оценка действий ISMCTS; не гарантирует математически оптимальный ход."""
+    """ISMCTS или MCTS по раскладам; не гарантирует оптимальный ход.
 
-    def __init__(self, trump: str, *, bottom_trump: str | None = None,
+    rollouts=None сохраняет ISMCTS с общим бюджетом iterations.
+    rollouts=N включает deals независимых деревьев, до N итераций на дерево.
+    threads задаёт число C++ потоков, time_limit_ms — общий бюджет времени.
+    """
+
+    def __init__(self, trump: str | None = None, *, bottom_trump: str | None = None,
                  iterations: int = 3000, time_limit_ms: float = 250,
                  seed: int | None = None, rollout_depth: int = 256,
+                 rollouts: int | None = None, deals: int = 1,
+                 exploration: float = 1.41421356237, threads: int = 1,
                  simultaneous_winner: str = "attacker"):
-        if trump.upper() not in ("C", "D", "H", "S"):
+        validate_search_options(iterations=iterations, time_limit_ms=time_limit_ms,
+                                rollout_depth=rollout_depth, rollouts=rollouts, deals=deals,
+                                exploration=exploration, threads=threads)
+        if trump is not None and trump.upper() not in ("C", "D", "H", "S"):
             raise ValueError("Козырь: C (крести), D (бубны), H (червы), S (пики)")
         if simultaneous_winner not in ("attacker", "defender"):
             raise ValueError("simultaneous_winner: attacker или defender")
-        self.trump, self.bottom_trump = trump.upper(), bottom_trump
+        self.trump, self.bottom_trump = trump.upper() if trump is not None else None, bottom_trump
         self.iterations, self.time_limit_ms = iterations, time_limit_ms
         self.seed, self.rollout_depth = seed, rollout_depth
+        self.rollouts, self.deals = rollouts, deals
+        self.exploration, self.threads = exploration, threads
         self.simultaneous_winner = simultaneous_winner
         self._native = _native_module()
 
     def suggest(self, state, **overrides) -> dict:
-        phase = _get(state, "phase")
+        phase = _phase(state)
         if phase in ("ready", "opponent_turn") and overrides.get("turn") != 0:
             return {"status": "waiting", "reason": "Игра ещё не началась" if phase == "ready" else "Ход соперника", "action": None}
+        trump = self.trump or _get(state, "trump")
+        if trump not in ("C", "D", "H", "S"):
+            return {"status": "waiting", "reason": "Козырь ещё не распознан", "action": None}
         observation = observation_from_state(
-            state, trump=self.trump, bottom_trump=self.bottom_trump,
+            state, trump=trump, bottom_trump=self.bottom_trump,
             simultaneous_winner=self.simultaneous_winner, **overrides,
         )
         if observation["turn"] != 0:
@@ -139,10 +187,15 @@ class DurakEngine:
             observation, iterations=self.iterations, time_limit_ms=self.time_limit_ms,
             seed=self.seed if self.seed is not None else secrets.randbits(64),
             rollout_depth=self.rollout_depth,
+            rollouts=self.rollouts if self.rollouts is not None else 0,
+            deals=self.deals, exploration=self.exploration, threads=self.threads,
         )
         result["status"] = "ok"
         result["value_kind"] = "rollout_score"  # not a calibrated probability
         for action in [result["action"], *result["moves"]]:
             if action["type"] == "defend":
                 action["target_card"] = observation["table"][action["target"]]["attack"]
+            elif action["type"] == "pass":
+                button = _text(_get(state, "button_text", _get(state, "button", "")))
+                action["button"] = "Bat" if button == "bat" else "Pass"
         return result

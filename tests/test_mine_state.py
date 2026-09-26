@@ -19,7 +19,7 @@ class MineStateTests(unittest.TestCase):
         }
         self.state = DurakGameState(detectors={
             name: lambda image, name=name: self.values[name] for name in self.values
-        }, field_confirmation_frames=1)  # Здесь проверяются события без задержки подтверждения.
+        }, field_confirmation_frames=1, deck_confirmation_frames=1)  # События без задержки подтверждения.
 
     def update(self, **values):
         self.values.update(values)
@@ -29,6 +29,39 @@ class MineStateTests(unittest.TestCase):
         self.update()
         self.assertEqual(self.state.field_cards, {"8H", "9H"})
         self.assertEqual(self.state.hand_cards, {"6C"})
+
+    def test_bat_button_allows_throw_in_without_discarding(self):
+        self.update(button=" B a t ", opponent="something")
+        self.assertEqual(self.state.phase, "throw_in")
+        self.assertEqual(self.state.field_cards, {"8H", "9H"})
+        self.assertFalse(self.state.out_cards)
+        self.assertIn("Подкинуть карты или нажать Bat", format_state(state_snapshot(self.state)))
+
+    def test_opponent_take_with_pass_button_keeps_table_until_pass(self):
+        layout = [{"card":"8H","covers":None},{"card":"9H","covers":0}]
+        self.update(button="Pass", field={"cards":["8H","9H"],"layout":layout})
+        before_count = self.state.opponent_card_count
+        self.update(opponent="I take")
+        self.assertEqual(self.state.phase, "throw_in")
+        self.assertEqual(self.state.field_cards, {"8H", "9H"})
+        self.assertEqual(self.state.field_layout, layout)
+        self.assertFalse(self.state.known_opponent_cards)
+        self.assertEqual(self.state.opponent_card_count, before_count)
+        self.update(field=[])
+        self.assertEqual(self.state.field_cards, {"8H", "9H"})
+        self.assertEqual(self.state.field_layout, layout)
+        self.update(mine="Pass")
+        self.assertFalse(self.state.field_cards)
+        self.assertEqual(self.state.known_opponent_cards, {"8H", "9H"})
+        self.assertEqual(self.state.opponent_card_count, before_count + 2)
+
+    def test_throw_more_then_button_leaves_pass_completes_take(self):
+        self.update(button="Pass", opponent="I take")
+        self.update(field=["8H", "9H", "8D"])
+        self.assertEqual(self.state.field_cards, {"8H", "9H", "8D"})
+        self.assertFalse(self.state.known_opponent_cards)
+        self.update(button="", field=[])
+        self.assertEqual(self.state.known_opponent_cards, {"8H", "9H", "8D"})
 
     def test_my_bat_moves_accumulated_table_even_after_it_disappears(self):
         self.update()
@@ -169,6 +202,59 @@ class DiscardConfirmationTests(unittest.TestCase):
         self.confirm()
         self.update(mine="Bat", field=["8H", "9H", "AS"])
         self.assertEqual(self.state.out_cards, {"8H", "9H"})
+
+    def test_opponent_take_excludes_corrected_and_transient_cards(self):
+        self.confirm(field=["8H", "9S"])
+        self.confirm(field=["8H", "9H"])
+        self.update(field=["8H", "9H", "AS"])
+        self.update(opponent="I take", field=[])
+        self.assertEqual(self.state.known_opponent_cards, {"8H", "9H"})
+
+    def test_confirm_throw_ins_while_opponent_is_taking(self):
+        self.confirm(button="Pass")
+        self.update(opponent="I take")
+        self.confirm(field=["8H", "9H", "8D"])
+        self.update(field=["8H", "9H", "8D", "AS"])
+        self.update(button="", field=[])
+        self.assertEqual(self.state.known_opponent_cards, {"8H", "9H", "8D"})
+
+    def test_unconfirmed_opponent_take_does_not_create_known_cards(self):
+        self.update(field=["AS"])
+        self.update(opponent="I take", field=[])
+        self.assertFalse(self.state.known_opponent_cards)
+
+    def test_my_take_excludes_transient_extra_cards(self):
+        self.update(field=["8H", "9H", "AS"])
+        self.confirm(field=["8H", "9H"])
+        self.update(mine="I take", field=[])
+        self.assertEqual(self.state.hand_cards, {"6C", "8H", "9H"})
+        self.assertNotIn("AS", self.state._pending_hand_cards)
+
+    def test_my_take_uses_corrected_confirmed_cards(self):
+        self.confirm(field=["8H", "9S"])
+        self.confirm(field=["8H", "9H"])
+        self.update(mine="I take", field=[])
+        self.assertEqual(self.state.hand_cards, {"6C", "8H", "9H"})
+
+    def test_my_take_does_not_add_noise_from_take_frame(self):
+        self.confirm()
+        self.update(mine="I take", field=["8H", "9H", "AS"])
+        self.assertEqual(self.state.hand_cards, {"6C", "8H", "9H"})
+        self.update(field=[])
+        self.assertEqual(self.state.hand_cards, {"6C", "8H", "9H"})
+
+    def test_my_take_confirms_additional_cards(self):
+        self.confirm()
+        self.update(mine="I take")
+        self.update(field=["8H", "9H", "8D"])
+        self.assertNotIn("8D", self.state.hand_cards)
+        self.update()
+        self.assertEqual(self.state.hand_cards, {"6C", "8H", "9H", "8D"})
+
+    def test_my_take_without_confirmed_table_does_not_invent_hand(self):
+        self.update(field=["AS"])
+        self.update(mine="I take", field=[])
+        self.assertEqual(self.state.hand_cards, {"6C"})
 
     def test_animation_and_next_round_do_not_extend_old_bat(self):
         self.confirm()

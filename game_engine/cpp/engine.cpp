@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -278,22 +279,21 @@ State Observation::sample(std::mt19937_64& rng) const {
     state.simultaneous_attacker_wins = simultaneous_attacker_wins;
     return state;
 }
-SearchResult search(const Observation& obs, int iterations, double time_limit_ms,
-                    std::uint64_t seed, int rollout_depth, double exploration) {
-    require(iterations > 0 && iterations <= 10000000, "iterations must be 1..10000000");
-    require(std::isfinite(time_limit_ms) && time_limit_ms >= 0, "Invalid time limit");
-    require(rollout_depth > 0 && rollout_depth <= 10000, "rollout_depth must be 1..10000");
-    require(std::isfinite(exploration) && exploration >= 0, "Invalid exploration constant");
-    obs.validate();
-    require(obs.turn == 0, "Recommendations require player 0's turn");
+namespace {
+using Clock = std::chrono::steady_clock;
+
+// Each tree and RNG belongs to a single task; no shared mutable tree nodes.
+SearchResult search_tree(const Observation& obs, int iterations, Clock::time_point deadline,
+                         std::uint64_t seed, int rollout_depth, double exploration,
+                         bool determinized, bool guarantee_one) {
     std::mt19937_64 rng(seed);
+    State fixed_world;
+    if (determinized) fixed_world = obs.sample(rng);
     Node root;
     SearchResult result;
-    auto start = std::chrono::steady_clock::now();
     for (int iteration = 0; iteration < iterations; ++iteration) {
-        double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-        if (iteration > 0 && time_limit_ms > 0 && elapsed >= time_limit_ms) break;
-        State state = obs.sample(rng);  // one fresh hidden world per iteration
+        if ((iteration > 0 || !guarantee_one) && Clock::now() >= deadline) break;
+        State state = determinized ? fixed_world : obs.sample(rng);
         Node* node = &root;
         std::vector<Node*> path{node};
         int depth = 0;
@@ -339,14 +339,94 @@ SearchResult search(const Observation& obs, int iterations, double time_limit_ms
         const auto& child = *entry.second;
         result.moves.push_back({entry.first, child.visits, child.visits ? child.total / child.visits : 0.0});
     }
-    std::sort(result.moves.begin(), result.moves.end(), [](const MoveStats& a, const MoveStats& b) {
+    return result;
+}
+
+std::uint64_t task_seed(std::uint64_t seed, int task) {
+    if (task == 0) return seed;  // preserve old single-thread ISMCTS sequence
+    auto z = seed + 0x9e3779b97f4a7c15ULL * static_cast<std::uint64_t>(task);
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
+}
+}  // namespace
+
+SearchResult search(const Observation& obs, int iterations, double time_limit_ms,
+                    std::uint64_t seed, int rollout_depth, double exploration,
+                    int rollouts, int deals, int threads) {
+    require(iterations > 0 && iterations <= 10000000, "iterations must be 1..10000000");
+    require(std::isfinite(time_limit_ms) && time_limit_ms >= 0, "Invalid time limit");
+    require(rollout_depth > 0 && rollout_depth <= 10000, "rollout_depth must be 1..10000");
+    require(std::isfinite(exploration) && exploration >= 0, "Invalid exploration constant");
+    require(rollouts >= 0 && rollouts <= 10000000, "rollouts must be 0..10000000 (0 = ISMCTS)");
+    require(deals > 0 && deals <= 100000, "deals must be 1..100000");
+    require(rollouts > 0 || deals == 1, "deals requires rollouts");
+    require(static_cast<std::int64_t>(rollouts) * deals <= 10000000,
+            "rollouts * deals must not exceed 10000000");
+    require(threads > 0 && threads <= 256, "threads must be 1..256");
+    const auto start = Clock::now();
+    auto deadline = Clock::time_point::max();
+    // Avoid overflowing the clock when passed a very large but finite limit.
+    const double available_ms = std::chrono::duration<double, std::milli>(deadline - start).count();
+    if (time_limit_ms > 0 && time_limit_ms < available_ms)
+        deadline = start + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double, std::milli>(time_limit_ms));
+    obs.validate();
+    require(obs.turn == 0, "Recommendations require player 0's turn");
+    const bool determinized = rollouts > 0;
+    const int tasks = determinized ? deals : std::min(threads, iterations);
+    const int workers = std::min(threads, tasks);
+    std::vector<SearchResult> partial(tasks);
+    auto work = [&](int worker) {
+        for (int task = worker; task < tasks; task += workers) {
+            if (task != 0 && Clock::now() >= deadline) break;
+            const int budget = determinized ? rollouts : iterations / tasks + (task < iterations % tasks);
+            partial[task] = search_tree(obs, budget, deadline, task_seed(seed, task),
+                                        rollout_depth, exploration, determinized, task == 0);
+            if (determinized && partial[task].iterations > 0) {
+                partial[task].deals_started = 1;
+                partial[task].deals_completed = partial[task].iterations == budget ? 1 : 0;
+            }
+        }
+    };
+    std::vector<std::future<void>> futures;
+    // std::future joins even during exception unwinding; worker exceptions reach Python.
+    for (int worker = 1; worker < workers; ++worker)
+        futures.push_back(std::async(std::launch::async, work, worker));
+    work(0);
+    for (auto& future : futures) future.get();
+
+    SearchResult result;
+    result.determinized = determinized;
+    result.threads = workers;
+    std::map<Move, std::pair<int, double>> totals;
+    // Stable reduction order makes fixed-budget determinized searches independent of thread count.
+    for (const auto& part : partial) {
+        result.iterations += part.iterations;
+        result.terminal_rollouts += part.terminal_rollouts;
+        result.deals_started += part.deals_started;
+        result.deals_completed += part.deals_completed;
+        for (const auto& stat : part.moves) {
+            auto& total = totals[stat.move];
+            total.first += stat.visits;
+            total.second += stat.value * stat.visits;
+        }
+    }
+    for (const auto& entry : totals) {
+        const auto& total = entry.second;
+        result.moves.push_back({entry.first, total.first, total.first ? total.second / total.first : 0.0});
+    }
+    std::sort(result.moves.begin(), result.moves.end(), [determinized](const MoveStats& a, const MoveStats& b) {
+        if ((a.visits > 0) != (b.visits > 0)) return a.visits > 0;
+        // Match the reference's W/N choice for determinizations; retain robust-child ISMCTS.
+        if (determinized && a.value != b.value) return a.value > b.value;
         if (a.visits != b.visits) return a.visits > b.visits;
         if (a.value != b.value) return a.value > b.value;
         return a.move < b.move;
     });
     require(!result.moves.empty(), "No move available");
     result.best = result.moves.front().move;
-    result.elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    result.elapsed_ms = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
     return result;
 }
 }  // namespace durak

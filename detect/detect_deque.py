@@ -4,7 +4,6 @@
 """
 
 import cv2
-from paddleocr import PaddleOCR
 import sys
 import os
 
@@ -32,6 +31,8 @@ def crop_by_size(img, crop):
 
 
 def main():
+    from paddleocr import PaddleOCR
+
     # --- 1. Загружаем и обрезаем изображение ---
     img = cv2.imread(SOURCE)
     if img is None:
@@ -41,7 +42,10 @@ def main():
 
     # --- 2. Инициализируем PaddleOCR на GPU (PaddleOCR 3.x) ---
     ocr = PaddleOCR(
-        use_textline_orientation=True,  # определять поворот текста
+        # Счётчик уже ориентирован правильно: автоповорот путает 6 и 9.
+        use_textline_orientation=False,
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
         lang="en",                      # язык: 'en', 'ru', 'ch' и т.д.
         device="gpu",                   # GPU (например, "gpu:0")
     )

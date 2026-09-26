@@ -189,6 +189,38 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(result['action']['card'],'7C')
         self.assertEqual(vars(state),before)
 
+    def test_pass_and_bat_buttons_offer_throw_in_or_finish(self):
+        for button, opponent, defense in [('Pass','I take',None),('Bat','something','7C')]:
+            with self.subTest(button=button):
+                full=position([['6D','AC'],['8D','9D']],table=[{'attack':'6C','defense':defense}])
+                layout=[{'card':'6C','covers':None}]
+                if defense:
+                    layout.append({'card':defense,'covers':0})
+                state=dict(phase='opponent_turn',button=button,opponent=opponent,mine='',
+                    hand_cards=full['hands'][0],field_cards=[p['card'] for p in layout],field_layout=layout,
+                    deck_remaining=0,opponent_card_count=2,known_opponent_cards=full['hands'][1],out_cards=full['discard'])
+                obs=observation_from_state(state,trump='S')
+                self.assertEqual((obs['attacker'],obs['turn']),(0,0))
+                self.assertEqual(obs['taking'],button=='Pass')
+                result=DurakEngine('S',iterations=100,time_limit_ms=0,seed=4).suggest(state)
+                self.assertEqual(result['status'],'ok')
+                self.assertTrue(any(m['type']=='attack' and m['card']=='6D' for m in result['moves']))
+                self.assertTrue(any(m['type']=='pass' and m['button']==button for m in result['moves']))
+
+    def test_live_state_keeps_opponent_take_compatible_with_search(self):
+        import numpy as np
+        from game_state.game import DurakGameState
+        from game_state.bot import state_snapshot
+        full=position([['6D','AC'],['8D','9D']],table=[{'attack':'6C'}])
+        data={'button':'Pass','opponent':'I take','mine':'','deque':0,'hand':['6D','AC'],
+              'field':{'cards':['6C'],'layout':[{'card':'6C','covers':None}]}}
+        state=DurakGameState(out_cards=set(full['discard']),known_opponent_cards={'8D','9D'},
+            detectors={key:lambda image,key=key:data[key] for key in data})
+        state.update(np.zeros((2,2,3),np.uint8))
+        engine=DurakEngine('S',iterations=100,time_limit_ms=0,seed=3)
+        self.assertEqual(engine.suggest(state)['status'],'ok')
+        self.assertEqual(engine.suggest(state_snapshot(state))['status'],'ok')
+
     def test_inconsistent_ocr_is_rejected(self):
         with self.assertRaises(ValueError):
             observation_from_state(dict(phase='defend_or_take',hand_cards=['7C'],

@@ -70,9 +70,14 @@ struct SearchResult {
     std::vector<MoveStats> moves;
     int iterations = 0;
     int terminal_rollouts = 0;
+    int deals_started = 0;
+    int deals_completed = 0;
+    int threads = 1;
+    bool determinized = false;
     double elapsed_ms = 0;
 };
 SearchResult search(const Observation& observation, int iterations,
                     double time_limit_ms, std::uint64_t seed,
-                    int rollout_depth = 256, double exploration = 1.41421356237);
+                    int rollout_depth = 256, double exploration = 1.41421356237,
+                    int rollouts = 0, int deals = 1, int threads = 1);
 }  // namespace durak

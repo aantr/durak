@@ -9,7 +9,7 @@ from game_state.engine_process import _initialize_engine
 
 class MctsOptionsTests(unittest.TestCase):
     def test_cli_forwards_search_options_without_connecting_to_phone(self):
-        with patch("iphone_screen.iphone_client_v2.IPhoneRemote"), patch("game_state.bot.run_bot") as run:
+        with patch("game_state.bot.preload_models"), patch("iphone_screen.iphone_client_v2.IPhoneRemote"), patch("game_state.bot.run_bot") as run:
             main(["--suggest-moves", "--mcts-rollouts", "5000", "--mcts-deals", "24",
                   "--mcts-exploration", "0.8", "--mcts-threads", "4", "--mcts-ms", "0"])
         options = run.call_args.kwargs["engine_options"]

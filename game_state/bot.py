@@ -6,6 +6,7 @@
     python -m game_state.bot --draw-detections
     python -m game_state.bot --no-window
     python -m game_state.bot --suggest-moves --trump S
+    python -m game_state.bot --slow-every 2 --draw-detections
 
 Esc/Q или Ctrl+C — выход. R — сброс состояния партии. Клик по окну передаётся на iPhone.
 Подсказки включаются через --suggest-moves; Space рассчитывает ход, ↑ выполняет последний рассчитанный ход.
@@ -33,7 +34,7 @@ import cv2
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from game_state.game import DurakGameState, RANKS, SUITS
+from game_state.game import DurakGameState, RANKS, SUITS, preload_models
 from game_state.engine_process import EngineProcess
 from game_state.move_input import execute_move
 
@@ -134,6 +135,8 @@ def format_state(snapshot: dict, *, width: int = 80, color: bool = False) -> str
     separator()
     row(f"Известные карты соперника [{len(snapshot['known_opponent_cards'])}]:  " + cards(snapshot["known_opponent_cards"]))
     row(f"Бита [{len(snapshot['out_cards'])}]:  " + cards(snapshot["out_cards"]))
+    last_out = snapshot.get("last_out_cards", [])
+    row(f"Последняя бита [{len(last_out)}]:  " + cards(last_out))
     recommendation = snapshot.get("recommendation")
     if recommendation:
         separator()
@@ -216,6 +219,7 @@ def state_snapshot(state: DurakGameState) -> dict:
         "field_cards": sorted(state.field_cards),
         "field_layout": [{"card": card["card"], "covers": card["covers"]} for card in state.field_layout],
         "out_cards": sorted(state.out_cards),
+        "last_out_cards": sorted(state.last_out_cards),
         "opponent_card_count": state.opponent_card_count,
         "known_opponent_cards": sorted(state.known_opponent_cards),
         # Это кандидаты: часть этих карт может ещё находиться в колоде.
@@ -227,7 +231,8 @@ def run_bot(
     iphone: IPhoneRemote,
     state: DurakGameState | None = None,
     *,
-    fps: float = 10.0,
+    fps: float | None = None,
+    slow_every: int = 2,
     show_window: bool = True,
     draw_detections: bool = False,
     state_format: str = "pretty",
@@ -236,16 +241,22 @@ def run_bot(
 ) -> DurakGameState:
     """Читает новые кадры до Esc/Q, закрытия окна или Ctrl+C.
 
-    ``fps`` — верхняя граница частоты распознавания, а не гарантия скорости
-    моделей. Пока выполняется update(), входящие кадры только отображаются.
+    По умолчанию после update() сразу берётся самый свежий новый кадр.
+    ``fps`` задаёт необязательную верхнюю границу частоты распознавания.
+    Пока выполняется update(), входящие кадры только отображаются.
+    mine/opponent читаются каждый обработанный кадр, остальные — раз в
+    slow_every кадров (по умолчанию 2), а также при смене надписей действий.
     Очередь распознавания не накапливается. Переданный клиент закрывает
     вызывающий код; run_bot освобождает своё окно и поток распознавания.
-    ``draw_detections`` показывает последний распознанный кадр с разметкой
-    всех областей; он обновляется с фактической частотой распознавания.
+    ``draw_detections`` показывает последний обработанный кадр. Разметка
+    пропущенных детекторов сохраняется до их следующего запуска; пустой
+    результат удаляет старую разметку. Фон всегда берётся из текущего кадра.
     ``state_format``: pretty — панель на русском, json — исходный JSON.
     """
-    if not math.isfinite(fps) or not 5 <= fps <= 60:
+    if fps is not None and (not math.isfinite(fps) or not 5 <= fps <= 60):
         raise ValueError("fps должен быть в диапазоне от 5 до 60")
+    if isinstance(slow_every, bool) or not isinstance(slow_every, int) or slow_every < 1:
+        raise ValueError("slow_every должен быть положительным целым числом")
     if state_format not in ("pretty", "json"):
         raise ValueError("state_format должен быть pretty или json")
     if state is None:
@@ -263,9 +274,9 @@ def run_bot(
 
     def update_state(frame):
         if draw_detections:
-            state.update(frame, draw_detections=True)
+            state.update(frame, draw_detections=True, slow_every=slow_every)
         else:
-            state.update(frame)
+            state.update(frame, slow_every=slow_every)
 
     def tap_done(future: Future) -> None:
         try:
@@ -286,6 +297,7 @@ def run_bot(
     current_snapshot = None
     recommendation = None
     latest_frame = None
+    last_processed_frame = None
     annotated_frame = None
     next_update = 0.0
     last_timeout_log = float("-inf")
@@ -303,7 +315,10 @@ def run_bot(
             cv2.resizeWindow(WINDOW_NAME, 460, 900)
             cv2.setMouseCallback(WINDOW_NAME, mouse)
 
-        logger.info("Ожидание видео iPhone; частота распознавания до %g FPS", fps)
+        if fps is None:
+            logger.info("Ожидание видео iPhone; распознавание без ограничения FPS")
+        else:
+            logger.info("Ожидание видео iPhone; частота распознавания до %g FPS", fps)
         first_frame = True
         while True:
             if move_pending is not None and move_pending.done():
@@ -351,8 +366,11 @@ def run_bot(
             try:
                 frame = iphone.get_screen(
                     wait_new=not first_frame,
-                    timeout=0.1,
+                    timeout=0.01,
                     copy=False,
+                    after_frame=(last_processed_frame
+                                 if pending is None and (fps is None or time.monotonic() >= next_update)
+                                 else latest_frame),
                 )
             except TimeoutError as exc:
                 now = time.monotonic()
@@ -367,7 +385,8 @@ def run_bot(
                     # Передаём отдельный BGR-кадр; отображение и декодер
                     # не могут изменить изображение во время распознавания.
                     pending = worker.submit(update_state, frame.copy())
-                    next_update = now + 1.0 / fps
+                    last_processed_frame = frame
+                    next_update = now + 1.0 / fps if fps is not None else 0.0
 
             if show_window:
                 display = annotated_frame if draw_detections and annotated_frame is not None else latest_frame
@@ -455,7 +474,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mac-ip", default=MAC_IP, help="IP Mac с DeviceKit bridge")
     parser.add_argument("--control-port", type=int, default=22004)
     parser.add_argument("--video-port", type=int, default=22005)
-    parser.add_argument("--fps", type=float, default=30.0, help="Максимальная частота распознавания (5–60)")
+    parser.add_argument("--fps", type=float, default=None, help="Ограничить частоту распознавания (5–60); по умолчанию без ограничения")
+    parser.add_argument("--slow-every", type=int, default=2,
+                        help="Кнопка, колода и карты: раз в N обработанных кадров; mine/opponent — каждый кадр (по умолчанию 2)")
     parser.add_argument("--no-window", action="store_true", help="Только вывод состояния в консоль")
     parser.add_argument("--draw-detections", action="store_true", help="Вставлять размеченные кропы всех детекторов обратно в кадр")
     parser.add_argument("--state-format", choices=("pretty", "json"), default="pretty", help="Формат состояния в консоли (по умолчанию pretty)")
@@ -469,8 +490,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mcts-exploration", type=float, default=1.41421356237, help="Коэффициент исследования UCT (>= 0)")
     parser.add_argument("--mcts-threads", type=int, default=1, help="Число потоков C++ поиска (1–256)")
     args = parser.parse_args(argv)
-    if not math.isfinite(args.fps) or not 5 <= args.fps <= 60:
+    if args.fps is not None and (not math.isfinite(args.fps) or not 5 <= args.fps <= 60):
         parser.error("--fps должен быть в диапазоне от 5 до 60")
+    if args.slow_every < 1:
+        parser.error("--slow-every должен быть >= 1")
     from game_engine.game_engine import validate_search_options
     try:
         validate_search_options(iterations=args.mcts_iterations, time_limit_ms=args.mcts_ms,
@@ -489,13 +512,16 @@ def main(argv: list[str] | None = None) -> int:
                                   exploration=args.mcts_exploration, threads=args.mcts_threads)
         from iphone_screen.iphone_client_v2 import IPhoneRemote
 
+        logger.info("Загрузка и прогрев моделей распознавания...")
+        preload_models()
+        logger.info("Модели готовы; подключение к iPhone")
         with IPhoneRemote(
             mac_ip=args.mac_ip,
             control_port=args.control_port,
             video_port=args.video_port,
         ) as iphone:
             run_bot(iphone, state=DurakGameState(trump=args.trump), fps=args.fps, show_window=not args.no_window, draw_detections=args.draw_detections,
-                    state_format=args.state_format, engine_options=engine_options)
+                    state_format=args.state_format, engine_options=engine_options, slow_every=args.slow_every)
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C")
     except Exception:

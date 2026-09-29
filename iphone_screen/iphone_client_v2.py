@@ -447,6 +447,7 @@ class IPhoneRemote:
         wait_new: bool = True,
         timeout: float = 2.0,
         copy: bool = False,
+        after_frame: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Return an OpenCV BGR ndarray.
@@ -454,6 +455,11 @@ class IPhoneRemote:
         wait_new=True:
             wait for a frame newer than the one seen when this method was
             called. Useful for synchronous automation loops.
+
+        after_frame (with wait_new=True):
+            return the latest frame if it differs from this previously returned
+            copy=False array; otherwise wait for a new frame. The decoder creates
+            a separate array for each frame, even when its pixels are unchanged.
 
         wait_new=False:
             return the newest frame immediately (waiting only if no frame
@@ -466,7 +472,9 @@ class IPhoneRemote:
 
             while True:
                 if self._latest_frame is not None:
-                    if not wait_new or self._frame_id > starting_id:
+                    fresh = (self._latest_frame is not after_frame if after_frame is not None
+                             else self._frame_id > starting_id)
+                    if not wait_new or fresh:
                         return (
                             self._latest_frame.copy()
                             if copy

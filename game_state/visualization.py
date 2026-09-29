@@ -19,9 +19,11 @@ def draw_label(image, text, x, y, color=(0, 255, 0)):
 
 
 class DetectionVisualization:
-    def __init__(self, image):
+    def __init__(self, image, *, layers=None):
         self.image = image
         self.crops = []
+        # Общий кеш разметки детекторов; None — обычный однокадровый режим.
+        self.layers = layers
 
     def add_crop(self, crop):
         """Координаты и fallback совпадают с detect_*.crop_by_size()."""
@@ -35,13 +37,26 @@ class DetectionVisualization:
         self.crops.append(((x1, y1, x2, y2), annotated))
         return annotated
 
-    def render(self):
-        result = self.image.copy()
-        for (x1, y1, x2, y2), annotated in self.crops:
+    def extract_layers(self, start=0):
+        """Сохраняет только координаты/цвета разметки, без старого фона.
+
+        Вызывается один раз после запуска детектора, не на пропущенных кадрах.
+        """
+        layers = []
+        for (x1, y1, x2, y2), annotated in self.crops[start:]:
             original = self.image[y1:y2, x1:x2]
             # Кроп кнопки лежит внутри кропа руки. Переносим изменённые
             # пиксели, чтобы вставка одного кропа не стёрла чужую разметку.
             changed = np.any(annotated != original, axis=2)
-            destination = result[y1:y2, x1:x2]
-            destination[changed] = annotated[changed]
+            ys, xs = np.nonzero(changed)
+            if ys.size:
+                layers.append((ys + y1, xs + x1, annotated[ys, xs]))
+        return layers
+
+    def render(self):
+        result = self.image.copy()
+        groups = self.layers.values() if self.layers is not None else (self.extract_layers(),)
+        for layers in groups:
+            for ys, xs, colors in layers:
+                result[ys, xs] = colors
         return result

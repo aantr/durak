@@ -148,6 +148,15 @@ class DeckConfirmationTests(unittest.TestCase):
 
 
 class DeckOcrTests(unittest.TestCase):
+    def test_shared_ocr_disables_both_orientation_models(self):
+        from game_state.game import _ocr
+        module = Mock()
+        with patch.dict("sys.modules", {"paddleocr": module}):
+            _ocr.__wrapped__()  # Не меняем глобальный кеш моделей в тесте.
+        module.PaddleOCR.assert_called_once_with(
+            use_textline_orientation=False, use_doc_orientation_classify=False,
+            lang="en", device="gpu")
+
     def test_counter_disables_rotation_and_keeps_crop_overlay(self):
         frame = np.zeros((80, 100, 3), dtype=np.uint8)
         visualization = DetectionVisualization(frame)

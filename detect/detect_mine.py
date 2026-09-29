@@ -42,7 +42,8 @@ def main():
 
     # --- 2. Инициализируем PaddleOCR на GPU (PaddleOCR 3.x) ---
     ocr = PaddleOCR(
-        use_textline_orientation=True,  # определять поворот текста
+        use_textline_orientation=False,
+        use_doc_orientation_classify=False,
         lang="en",                      # язык: 'en', 'ru', 'ch' и т.д.
         device="gpu",                   # GPU (например, "gpu:0")
     )

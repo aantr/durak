@@ -4,3 +4,6 @@ generation_field
 generation_suit
 screenshots
 runs
+.venv-usb/
+devicekit-python
+selfIdentity.plist

@@ -73,7 +73,8 @@ def _cards(value: Any) -> set[str]:
 def _ocr() -> Any:
     from paddleocr import PaddleOCR
     # Экземпляр создаётся один раз: без этого OCR не выдержит поток 5–60 FPS.
-    return PaddleOCR(use_textline_orientation=True, lang="en", device="gpu")
+    return PaddleOCR(use_textline_orientation=False, use_doc_orientation_classify=False,
+                     lang="en", device="gpu")
 
 
 def _ocr_lines(image: np.ndarray, crop: Mapping[tuple[int, int], tuple[int, int, int, int]], cropper: Callable[..., np.ndarray], *, visualization=None, fixed_orientation: bool = False) -> list[str]:
@@ -149,6 +150,21 @@ def _models(on_field: bool) -> tuple[Any, Any]:
     from constants.constants import DETECTION_ENGINE_PATH, DETECTION_FIELD_ENGINE_PATH, CLASSIFY_SUIT_WEIGHTS_PATH
     weights = DETECTION_FIELD_ENGINE_PATH if on_field else DETECTION_ENGINE_PATH
     return YOLO(str(weights)), YOLO(str(CLASSIFY_SUIT_WEIGHTS_PATH))
+
+
+@lru_cache(maxsize=1)
+def preload_models() -> None:
+    """Загружает модели и инициализирует YOLO/TensorRT до получения видео."""
+    from constants.constants import IMAGE_SIZE, IMAGE_SIZE_FIELD, IMAGE_SIZE_SUIT
+
+    _ocr()
+    suit_image = np.zeros((IMAGE_SIZE_SUIT, IMAGE_SIZE_SUIT, 3), dtype=np.uint8)
+    for on_field, size in ((False, IMAGE_SIZE), (True, IMAGE_SIZE_FIELD)):
+        model, suit_model = _models(on_field)
+        # Одного YOLO(path) недостаточно: backend создаётся в первом predict().
+        model.predict(source=(np.zeros((size, size, 3), dtype=np.uint8),),
+                      imgsz=size, conf=.5, iou=.45, save=False, show=False, verbose=False)
+        suit_model.predict(source=suit_image, imgsz=IMAGE_SIZE_SUIT, verbose=False)
 
 
 def _detect_hand_cards(image: np.ndarray, *, visualization=None) -> dict:
@@ -272,6 +288,8 @@ class DurakGameState:
     hand_cards: set[str] = field(default_factory=set)
     field_cards: set[str] = field(default_factory=set)
     out_cards: set[str] = field(default_factory=set)
+    # Только фактически добавленные карты последнего отбоя; не отдельная зона.
+    last_out_cards: set[str] = field(default_factory=set, init=False)
     known_opponent_cards: set[str] = field(default_factory=set)
     unknown_opponent_cards: set[str] = field(default_factory=lambda: set(FULL_DECK))
     opponent_card_count: int | None = None
@@ -297,6 +315,7 @@ class DurakGameState:
     _trump_candidate: str | None = field(default=None, init=False, repr=False)
     _trump_candidate_frames: int = field(default=0, init=False, repr=False)
     annotated_frame: np.ndarray | None = field(default=None, init=False, repr=False, compare=False)
+    _detection_overlays: dict[str, list] = field(default_factory=dict, init=False, repr=False, compare=False)
     _deck_missing_frames: int = field(default=0, init=False, repr=False)
     _last_opponent_action: str = field(default="", init=False, repr=False)
     _last_mine_action: str = field(default="", init=False, repr=False)
@@ -307,6 +326,8 @@ class DurakGameState:
     _confirmed_table: set[str] = field(default_factory=set, init=False, repr=False)
     _table_candidate: set[str] = field(default_factory=set, init=False, repr=False)
     _table_candidate_frames: int = field(default=0, init=False, repr=False)
+    # Последовательные реальные наблюдения известной карты в новой зоне.
+    _opponent_move_candidates: dict[tuple[str, str], int] = field(default_factory=dict, init=False, repr=False)
     # Взятые карты остаются в руке до подтверждения её детектором либо розыгрыша.
     _pending_hand_cards: set[str] = field(default_factory=set, init=False, repr=False)
     _last_field_cards: set[str] = field(default_factory=set, init=False, repr=False)
@@ -338,29 +359,63 @@ class DurakGameState:
         self.__dict__.clear()
         self.__dict__.update(fresh.__dict__)
 
-    def update(self, image: np.ndarray, *, draw_detections: bool = False) -> "DurakGameState":
+    def update(self, image: np.ndarray, *, draw_detections: bool = False,
+               slow_every: int = 1) -> "DurakGameState":
         """Обновляет состояние; опционально сохраняет разметку в annotated_frame.
 
         Разметку предоставляют встроенные детекторы. Переданные через
         detectors функции по-прежнему получают только исходное изображение.
+        При slow_every > 1 mine/opponent читаются каждый кадр, остальные
+        детекторы — каждый N-й вызов, начиная с первого. Изменение надписей
+        либо размера кадра запускает полный проход вне очереди.
+        Разметка пропущенных детекторов сохраняется до следующего запуска;
+        пустой результат удаляет их прежние рамки и подписи.
         """
         if not isinstance(image, np.ndarray) or image.size == 0:
             raise ValueError("image должен быть непустым изображением cv2/numpy.ndarray")
+        if isinstance(slow_every, bool) or not isinstance(slow_every, int) or slow_every < 1:
+            raise ValueError("slow_every должен быть положительным целым числом")
+        previous_size = self.frame_size
+        if previous_size != (image.shape[1], image.shape[0]):
+            self._opponent_move_candidates.clear()
         self.frame_number += 1
         self.frame_size = (image.shape[1], image.shape[0])
-        visualization = DetectionVisualization(image) if draw_detections else None
+        starting_draw = draw_detections and self.annotated_frame is None
+        if not draw_detections or previous_size != self.frame_size:
+            self._detection_overlays.clear()
+        visualization = (DetectionVisualization(image, layers=self._detection_overlays)
+                         if draw_detections else None)
 
         def detect(key):
             detector = self.detectors[key]
+            start = len(visualization.crops) if visualization is not None else 0
             if visualization is not None and detector is _DEFAULT_DETECTORS[key]:
-                return detector(image, visualization=visualization)
-            return detector(image)
+                result = detector(image, visualization=visualization)
+            else:
+                result = detector(image)
+            if visualization is not None:
+                # Заменяем даже пустым слоем: пропуск запуска != ничего не найдено.
+                self._detection_overlays[key] = visualization.extract_layers(start)
+            return result
 
-        raw_button, raw_opponent, raw_mine, raw_deque = (detect(key) for key in ("button", "opponent", "mine", "deque"))
-        self.button_text, self.opponent_text = normalize_text(raw_button), normalize_text(raw_opponent)
-        self.mine_text = normalize_text(raw_mine)
+        # Надписи действий приоритетны: читаем их до любых тяжёлых детекторов.
+        mine_text = normalize_text(detect("mine"))
+        opponent_text = normalize_text(detect("opponent"))
+        actions_changed = (mine_text, opponent_text) != (self.mine_text, self.opponent_text)
+        self.mine_text, self.opponent_text = mine_text, opponent_text
+        full_update = ((self.frame_number - 1) % slow_every == 0
+                       or actions_changed or previous_size != self.frame_size or starting_draw)
+        if not full_update:
+            # Не выдаём кеш карт/колоды за новое наблюдение: не подтверждаем
+            # повторно стол, пустую колоду и не выполняем переносы карт.
+            self.annotated_frame = visualization.render() if visualization is not None else None
+            return self
+
+        self.button_text = normalize_text(detect("button"))
         self._set_phase()
-        self._update_deck_count(raw_deque)
+        self._update_deck_count(detect("deque"))
+        if self.deck_remaining == 0 or self.phase == "ready":
+            self._detection_overlays.pop("trump", None)
         hand_result = detect("hand")
         self.hand_cards = _cards(hand_result)
         self.hand_layout = list(hand_result.get("layout", [])) if isinstance(hand_result, Mapping) else []
@@ -378,13 +433,44 @@ class DurakGameState:
         field_result = detect("field")
         self.field_cards = _cards(field_result)
         self.field_layout = list(field_result.get("layout", [])) if isinstance(field_result, Mapping) else []
-        self._apply_table_events()
+        observed_field = self.field_cards - self.hand_cards
+        self._confirm_opponent_card_transitions()
+        self._apply_table_events(observed_field=observed_field)
         self.hand_cards.update(self._pending_hand_cards)
         self.hand_cards.difference_update(self.out_cards)
         self.known_opponent_cards.difference_update(self.hand_cards | self.out_cards)
         self._refresh_opponent()
         self.annotated_frame = visualization.render() if visualization is not None else None
         return self
+
+    def _confirm_opponent_card_transitions(self) -> None:
+        """Не забывает руку соперника из-за одиночной ошибки детектора.
+
+        До field_confirmation_frames наблюдений в одной зоне приоритет у
+        известной руки соперника. Проверка покарточная: изменение других карт
+        не сбрасывает подтверждение. Вызывается только при свежей детекции.
+        """
+        previous = self._opponent_move_candidates
+        current = {}
+        ambiguous = self.hand_cards & self.field_cards
+        for zone, cards, layout in (
+            ("hand", self.hand_cards, self.hand_layout),
+            ("field", self.field_cards, self.field_layout),
+        ):
+            pending = set()
+            for card in cards & self.known_opponent_cards:
+                key = (card, zone)
+                count = 0 if card in ambiguous else previous.get(key, 0) + 1
+                if count:
+                    current[key] = min(count, self.field_confirmation_frames)
+                if count < self.field_confirmation_frames:
+                    pending.add(card)
+            cards.difference_update(pending)
+            # Не удаляем геометрию: covers содержит индексы элементов layout.
+            # Копируем записи, чтобы не менять возвращённый детектором объект.
+            layout[:] = [dict(item, card=None) if item.get("card") in pending else item
+                         for item in layout]
+        self._opponent_move_candidates = current
 
     def _update_deck_count(self, raw_count: Any) -> None:
         if raw_count is None or (isinstance(raw_count, str) and not raw_count.strip()):
@@ -422,7 +508,7 @@ class DurakGameState:
     def _set_phase(self) -> None:
         self.phase = {"pass": "throw_in", "bat": "throw_in", "yourturn": "your_turn", "ready": "ready", "itake": "defend_or_take"}.get(self.button_text, "opponent_turn")
 
-    def _apply_table_events(self) -> None:
+    def _apply_table_events(self, *, observed_field: set[str] | None = None) -> None:
         """Переносит накопленный стол по надписям игроков, не по кнопке.
 
         Состав стола сохраняется при исчезновении карт до прихода OCR-сигнала.
@@ -430,6 +516,10 @@ class DurakGameState:
         всех распознаваний. После Bat состав биты заморожен до нового стола
         и исчезновения терминальных надписей. При I take можно ещё подкидывать.
         """
+        # Даже ещё не подтверждённая карта означает непустое наблюдение стола.
+        # Иначе фильтр переходов задерживал бы начало следующего розыгрыша.
+        observed = self.field_cards if observed_field is None else observed_field
+        observed = observed - self.out_cards
         actions = {"pass", "bat", "itake"}
         mine = self.mine_text if self.mine_text in actions else ""
         opponent = self.opponent_text if self.opponent_text in actions else ""
@@ -454,24 +544,24 @@ class DurakGameState:
             # Bat часто остаётся на экране во время анимации/следующей раздачи.
             # Повторные сигналы от обоих игроков не должны дополнять старую биту.
             self.field_cards.difference_update(self.out_cards)
-            if terminal_visible or not self.field_cards:
-                self._table_was_empty = not self.field_cards
+            if terminal_visible or not observed:
+                self._table_was_empty = not observed
                 self.field_cards.clear()
                 self.field_layout.clear()
                 return
             self._reset_table_tracking()
 
-        if (self._round_destination is not None and self.field_cards and self._round_cards
+        if (self._round_destination is not None and observed and self._round_cards
                 and not can_throw_to_taking_opponent):
             # Новый стол без старых карт либо повторный розыгрыш взятых карт
             # после пустого стола и завершения прежних надписей.
-            if (self.field_cards.isdisjoint(self._round_cards)
+            if (observed.isdisjoint(self._round_cards)
                     or (self._table_was_empty and not terminal_visible)):
                 self._reset_table_tracking()
 
         if (self._round_destination is None and self._table_was_empty
-                and self.field_cards and self._round_cards and not destinations
-                and self.field_cards.isdisjoint(self._round_cards)):
+                and observed and self._round_cards and not destinations
+                and observed.isdisjoint(self._round_cards)):
             # Между столами мог быть пропущен I take/Bat. Старый снимок не
             # наследуется новым розыгрышем даже до подтверждения его карт.
             self._reset_table_tracking()
@@ -479,7 +569,9 @@ class DurakGameState:
         if self._round_destination in (None, "mine") or (
             self._round_destination == "opponent" and can_throw_to_taking_opponent
         ):
-            visible = self.field_cards - self.out_cards - self.hand_cards
+            # Подтверждаем исходные наблюдения параллельно переходу карты
+            # соперника, а не начинаем второй цикл ожидания после него.
+            visible = observed - self.hand_cards
             if visible and visible == self._table_candidate:
                 self._table_candidate_frames += 1
             else:
@@ -493,7 +585,7 @@ class DurakGameState:
         if self.field_cards:
             self._last_field_cards = set(self.field_cards)
             self._last_field_layout = [dict(item) for item in self.field_layout]
-        self._table_was_empty = not self.field_cards
+        self._table_was_empty = not observed
         self._round_cards.update(self.field_cards)
         if self._round_destination is None and len(destinations) == 1:
             self._round_destination = destinations.pop()
@@ -518,6 +610,7 @@ class DurakGameState:
         moved = self._round_cards - self._transferred_cards
         if self._round_destination == "out":
             moved = self._confirmed_table - self.hand_cards - self.out_cards
+            self.last_out_cards = set(moved)
             self._round_cards = set(moved)
             self.out_cards.update(moved)
             self._pending_hand_cards.difference_update(moved)

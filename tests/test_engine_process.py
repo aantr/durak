@@ -150,7 +150,7 @@ class EngineProcessTests(unittest.TestCase):
             return future
 
         with patch("game_state.bot.ThreadPoolExecutor") as thread_pool, patch(
-            "game_state.bot.time.monotonic", side_effect=range(100)
+            "game_state.bot.time.monotonic", return_value=0.0
         ), patch("game_state.bot.cv2.namedWindow"), patch(
             "game_state.bot.cv2.resizeWindow"
         ), patch("game_state.bot.cv2.setMouseCallback"), patch(
@@ -247,13 +247,20 @@ class EngineProcessTests(unittest.TestCase):
         self.futures.clear()
         frame = np.zeros((100, 200, 3), dtype=np.uint8)
         iphone = Mock()
-        iphone.get_screen.return_value = frame
         sent = Future()
         sent.set_result(None)
         iphone.send_tap_async.return_value = sent
         button_values = iter(buttons or ["pass"] * len(keys))
+        current_button = ""
+
+        def next_frame(**kwargs):
+            nonlocal current_button
+            current_button = next(button_values)
+            return frame
+
+        iphone.get_screen.side_effect = next_frame
         state = DurakGameState(detectors={
-            "button": lambda _: next(button_values), "opponent": lambda _: "",
+            "button": lambda _: current_button, "opponent": lambda _: "",
             "mine": lambda _: "", "deque": lambda _: 24,
             "hand": lambda _: [], "field": lambda _: [],
         })

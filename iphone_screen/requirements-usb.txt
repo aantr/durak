@@ -1,0 +1,4 @@
+pymobiledevice3==11.19.3
+av
+opencv-python
+numpy

@@ -20,7 +20,7 @@ DETECTION_FIELD_WEIGHTS_PATH = (
 )
 
 DETECTION_FIELD_ENGINE_PATH = (
-    DIR / "runs/detect/runs_field/yolo26s_p2/weights/best.pt"
+    DIR / "runs/detect/runs_field/yolo26s_p2/weights/best.engine"
 )
 
 CLASSIFY_SUIT_WEIGHTS_PATH = (

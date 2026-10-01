@@ -73,6 +73,7 @@ class EngineProcessTests(unittest.TestCase):
         self.worker.request(snapshot)
         self.futures[0].set_result(move)
         self.assertEqual(self.worker.poll(), move)
+        self.assertEqual(self.worker.last_evaluation, 0.7)
         next_snapshot = {**snapshot, "hand_cards": ["7C"]}
         self.worker.request(next_snapshot)
         recommendation = self.worker.poll()
@@ -82,6 +83,13 @@ class EngineProcessTests(unittest.TestCase):
         panel = format_state({**next_snapshot, "recommendation": recommendation})
         self.assertIn("Предыдущий ход: Походить 6♣ | Calculating...", panel)
         self.assertEqual(recommendation_overlay(move), "Play 6C | Ready")
+        self.assertEqual(self.worker.last_evaluation, 0.7)
+        panel = format_state({**snapshot, "last_evaluation": self.worker.last_evaluation})
+        self.assertIn("Последняя оценка игры: 0.700", panel)
+        self.worker.reset(clear_evaluation=False)
+        self.assertEqual(self.worker.last_evaluation, 0.7)
+        self.worker.reset()
+        self.assertIsNone(self.worker.last_evaluation)
 
     def test_reset_discards_running_result_even_for_identical_snapshot(self):
         snapshot = {"trump": "S"}
@@ -193,6 +201,7 @@ class EngineProcessTests(unittest.TestCase):
         ), patch("game_state.bot.cv2.getWindowProperty", return_value=1), patch(
             "game_state.bot.cv2.destroyWindow"
         ):
+            engine.return_value.last_evaluation = None
             thread_pool.return_value.submit.side_effect = [active, next_frame]
             thread_pool.return_value.shutdown.side_effect = lambda **kwargs: next_frame.cancel()
             returned = run_bot(iphone, state=state, engine_options={})
@@ -240,6 +249,23 @@ class EngineProcessTests(unittest.TestCase):
     def test_changed_button_prevents_executing_old_move(self):
         iphone = self.run_key_sequence([-1, ord(" "), -1, 65362, ord("q")],
                                        buttons=["pass", "pass", "", "", ""])
+        iphone.send_tap_async.assert_not_called()
+
+    def test_enter_enables_auto_calculation_and_executes_once(self):
+        for key in (13, 10, 16777220, 16777221, 65293, 65421):
+            with self.subTest(key=key):
+                iphone = self.run_key_sequence([key, -1, -1, -1, -1, ord("q")], complete_on=(4,))
+                self.executor.submit.assert_called_once()
+                iphone.send_tap_async.assert_called_once_with(40, 70)
+
+    def test_enter_off_before_execution_discards_finished_result(self):
+        iphone = self.run_key_sequence([13, -1, -1, 13, -1, ord("q")], complete_on=(4,))
+        self.executor.submit.assert_called_once()
+        iphone.send_tap_async.assert_not_called()
+
+    def test_auto_never_executes_result_after_button_changed(self):
+        iphone = self.run_key_sequence([13, -1, -1, -1, -1, ord("q")], complete_on=(4,),
+                                      buttons=["pass", "pass", "", "", "", ""])
         iphone.send_tap_async.assert_not_called()
 
     def run_key_sequence(self, keys, *, complete_on=(3,), buttons=None):

@@ -1,8 +1,9 @@
-"""Расчёт подсказки в отдельном процессе по явному запросу пользователя."""
+"""Расчёт подсказки в отдельном процессе по ручному запросу или запросу автоигры."""
 
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
 import multiprocessing
+import math
 
 
 _engine = None
@@ -28,11 +29,14 @@ class EngineProcess:
         self.pending = None
         self.recommendation = None
         self.last_move = None
+        self.last_evaluation = None
         self.generation = 0
         self.submitted_generation = 0
 
-    def reset(self):
+    def reset(self, *, clear_evaluation=True):
         self.generation += 1
+        if clear_evaluation:
+            self.last_evaluation = None
         self.recommendation = None
         self.last_move = None
         if self.pending is not None and self.pending.cancel():
@@ -61,6 +65,10 @@ class EngineProcess:
             if self.submitted_generation == self.generation:
                 if result.get("status") == "ok":
                     self.last_move = result
+                    moves = result.get("moves", [])
+                    value = moves[0].get("value") if moves else None
+                    if isinstance(value, (int, float)) and math.isfinite(value):
+                        self.last_evaluation = value
                 self.recommendation = result
         result = self.recommendation
         if result is None:

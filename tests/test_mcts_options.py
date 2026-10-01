@@ -10,15 +10,17 @@ from game_state.engine_process import _initialize_engine
 class MctsOptionsTests(unittest.TestCase):
     def test_cli_forwards_search_options_without_connecting_to_phone(self):
         with patch("game_state.bot.preload_models"), patch("iphone_screen.iphone_client_v2.IPhoneRemote"), patch("game_state.bot.run_bot") as run:
-            main(["--suggest-moves", "--mcts-rollouts", "5000", "--mcts-deals", "24",
+            main(["--auto-delay", "0.5", "--mcts-rollouts", "5000", "--mcts-deals", "24",
                   "--mcts-exploration", "0.8", "--mcts-threads", "4", "--mcts-ms", "0"])
+        self.assertEqual(run.call_args.kwargs["auto_delay"], 0.5)
         options = run.call_args.kwargs["engine_options"]
         for key, value in dict(rollouts=5000, deals=24, exploration=0.8, threads=4, time_limit_ms=0).items():
             self.assertEqual(options[key], value)
 
     def test_invalid_cli_options_rejected_before_phone_connection(self):
         for args in (["--mcts-deals", "5"], ["--mcts-threads", "0"],
-                     ["--mcts-rollouts", "0"], ["--mcts-exploration", "nan"]):
+                     ["--mcts-rollouts", "0"], ["--mcts-exploration", "nan"],
+                     ["--auto-delay", "-1"], ["--auto-delay", "nan"], ["--auto-delay", "inf"]):
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), patch(
                 "iphone_screen.iphone_client_v2.IPhoneRemote"
             ) as phone:

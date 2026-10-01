@@ -19,7 +19,8 @@ class MineStateTests(unittest.TestCase):
         }
         self.state = DurakGameState(detectors={
             name: lambda image, name=name: self.values[name] for name in self.values
-        }, field_confirmation_frames=1, deck_confirmation_frames=1)  # События без задержки подтверждения.
+        }, field_confirmation_frames=1, terminal_field_frames=1,
+                                    deck_confirmation_frames=1)  # События без задержки подтверждения.
 
     def update(self, **values):
         self.values.update(values)
@@ -176,7 +177,7 @@ class DiscardConfirmationTests(unittest.TestCase):
         }
         self.state = DurakGameState(detectors={
             name: lambda image, name=name: self.values[name] for name in self.values
-        })
+        }, terminal_field_frames=1)
 
     def update(self, **values):
         self.values.update(values)

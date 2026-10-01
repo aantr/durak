@@ -274,6 +274,9 @@ _DEFAULT_DETECTORS = {
 }
 
 
+TERMINAL_FIELD_FRAMES = 5
+
+
 @dataclass
 class DurakGameState:
     """Наблюдаемое состояние одной 36-карточной игры.
@@ -300,6 +303,8 @@ class DurakGameState:
     frame_number: int = 0
     # Для необратимого переноса в биту нужен устойчивый снимок стола.
     field_confirmation_frames: int = 2
+    # После Bat или I take соперника поле читается на каждом из этих кадров.
+    terminal_field_frames: int = TERMINAL_FIELD_FRAMES
     # covers=None — нижняя карта; иначе индекс нижней карты в field_layout.
     # card=None сохраняет геометрию даже при нераспознанной масти.
     field_layout: list[dict[str, Any]] = field(default_factory=list)
@@ -332,10 +337,20 @@ class DurakGameState:
     _pending_hand_cards: set[str] = field(default_factory=set, init=False, repr=False)
     _last_field_cards: set[str] = field(default_factory=set, init=False, repr=False)
     _last_field_layout: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
+    _terminal_frames_left: int = field(default=0, init=False, repr=False)
+    _terminal_mine_action: str = field(default="", init=False, repr=False)
+    _terminal_opponent_action: str = field(default="", init=False, repr=False)
+    _terminal_card_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _terminal_confirmed_before: set[str] = field(default_factory=set, init=False, repr=False)
+    _terminal_seen_cards: set[str] = field(default_factory=set, init=False, repr=False)
+    _terminal_had_gap: bool = field(default=False, init=False, repr=False)
+    _terminal_new_round: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.field_confirmation_frames, int) or self.field_confirmation_frames < 1:
             raise ValueError("field_confirmation_frames должен быть положительным целым числом")
+        if isinstance(self.terminal_field_frames, bool) or not isinstance(self.terminal_field_frames, int) or self.terminal_field_frames < 1:
+            raise ValueError("terminal_field_frames должен быть положительным целым числом")
         if not isinstance(self.deck_empty_confirmation_frames, int) or self.deck_empty_confirmation_frames < 1:
             raise ValueError("deck_empty_confirmation_frames должен быть положительным целым числом")
         if isinstance(self.deck_confirmation_frames, bool) or not isinstance(self.deck_confirmation_frames, int) or self.deck_confirmation_frames < 1:
@@ -353,6 +368,7 @@ class DurakGameState:
         fresh = type(self)(
             detectors=self.detectors, trump=trump,
             field_confirmation_frames=self.field_confirmation_frames,
+            terminal_field_frames=self.terminal_field_frames,
             deck_empty_confirmation_frames=self.deck_empty_confirmation_frames,
             deck_confirmation_frames=self.deck_confirmation_frames,
         )
@@ -367,7 +383,8 @@ class DurakGameState:
         detectors функции по-прежнему получают только исходное изображение.
         При slow_every > 1 mine/opponent читаются каждый кадр, остальные
         детекторы — каждый N-й вызов, начиная с первого. Изменение надписей
-        либо размера кадра запускает полный проход вне очереди.
+        либо размера кадра запускает полный проход вне очереди. После Bat
+        или I take соперника поле читается terminal_field_frames кадров подряд.
         Разметка пропущенных детекторов сохраняется до следующего запуска;
         пустой результат удаляет их прежние рамки и подписи.
         """
@@ -401,10 +418,30 @@ class DurakGameState:
         # Надписи действий приоритетны: читаем их до любых тяжёлых детекторов.
         mine_text = normalize_text(detect("mine"))
         opponent_text = normalize_text(detect("opponent"))
-        actions_changed = (mine_text, opponent_text) != (self.mine_text, self.opponent_text)
+        previous_mine, previous_opponent = self.mine_text, self.opponent_text
+        actions_changed = (mine_text, opponent_text) != (previous_mine, previous_opponent)
         self.mine_text, self.opponent_text = mine_text, opponent_text
+        terminal_started = ((mine_text == "bat" and previous_mine != "bat")
+                            or (opponent_text in {"bat", "itake"} and opponent_text != previous_opponent))
+        if terminal_started and self._terminal_frames_left == 0:
+            self._terminal_frames_left = self.terminal_field_frames
+            self._terminal_card_counts = {
+                card: self._table_candidate_frames for card in self._table_candidate
+            }
+            self._terminal_confirmed_before = set(self._confirmed_table)
+            self._terminal_seen_cards = self._confirmed_table | self._table_candidate
+            self._terminal_had_gap = False
+            self._terminal_new_round = False
+            self._terminal_mine_action = ""
+            self._terminal_opponent_action = ""
+        if self._terminal_frames_left:
+            if mine_text in {"bat", "itake"}:
+                self._terminal_mine_action = mine_text
+            if opponent_text in {"bat", "itake"}:
+                self._terminal_opponent_action = opponent_text
         full_update = ((self.frame_number - 1) % slow_every == 0
-                       or actions_changed or previous_size != self.frame_size or starting_draw)
+                       or actions_changed or previous_size != self.frame_size or starting_draw
+                       or self._terminal_frames_left > 0)
         if not full_update:
             # Не выдаём кеш карт/колоды за новое наблюдение: не подтверждаем
             # повторно стол, пустую колоду и не выполняем переносы карт.
@@ -435,13 +472,66 @@ class DurakGameState:
         self.field_layout = list(field_result.get("layout", [])) if isinstance(field_result, Mapping) else []
         observed_field = self.field_cards - self.hand_cards
         self._confirm_opponent_card_transitions()
-        self._apply_table_events(observed_field=observed_field)
+        if self._terminal_frames_left:
+            can_throw_more = (self._terminal_opponent_action == "itake"
+                              and self.button_text == "pass" and mine_text != "pass")
+            if observed_field and self._terminal_had_gap and not can_throw_more:
+                if observed_field.isdisjoint(self._terminal_seen_cards):
+                    # После исчезновения прежнего стола начался новый розыгрыш.
+                    self._terminal_new_round = True
+            if not observed_field and self._terminal_seen_cards:
+                self._terminal_had_gap = True
+            if not self._terminal_new_round:
+                for card in observed_field:
+                    self._terminal_card_counts[card] = self._terminal_card_counts.get(card, 0) + 1
+                self._terminal_seen_cards.update(observed_field)
+                if self.field_cards:
+                    self._last_field_cards = set(self.field_cards)
+                    self._last_field_layout = [dict(item) for item in self.field_layout]
+            self._terminal_frames_left -= 1
+            if self._terminal_frames_left == 0:
+                confirmed = self._terminal_confirmed_before | {
+                    card for card, count in self._terminal_card_counts.items()
+                    if count >= self.field_confirmation_frames
+                }
+                new_field = set(self.field_cards) if self._terminal_new_round else set()
+                new_layout = [dict(item) for item in self.field_layout] if self._terminal_new_round else []
+                if self._terminal_new_round:
+                    self.field_cards.clear()
+                    self.field_layout.clear()
+                if self._terminal_opponent_action == "itake" and self.button_text == "pass":
+                    self._last_field_cards = set(confirmed)
+                    self._last_field_layout = [
+                        item for item in self._last_field_layout if item.get("card") in confirmed
+                    ]
+                self._apply_table_events(
+                    observed_field=set() if self._terminal_new_round else observed_field,
+                    mine_action=self._terminal_mine_action or mine_text,
+                    opponent_action=self._terminal_opponent_action or opponent_text,
+                    confirmed_additional=confirmed,
+                )
+                if new_field:
+                    self.field_cards = new_field
+                    self.field_layout = new_layout
+                self._terminal_card_counts.clear()
+                self._terminal_confirmed_before.clear()
+                self._terminal_seen_cards.clear()
+                self._terminal_had_gap = self._terminal_new_round = False
+                self._terminal_mine_action = self._terminal_opponent_action = ""
+        else:
+            self._apply_table_events(observed_field=observed_field)
         self.hand_cards.update(self._pending_hand_cards)
         self.hand_cards.difference_update(self.out_cards)
         self.known_opponent_cards.difference_update(self.hand_cards | self.out_cards)
         self._refresh_opponent()
         self.annotated_frame = visualization.render() if visualization is not None else None
         return self
+
+    @property
+    def terminal_pending(self) -> bool:
+        """Истина, пока собираются кадры после конечной надписи розыгрыша."""
+
+        return self._terminal_frames_left > 0
 
     def _confirm_opponent_card_transitions(self) -> None:
         """Не забывает руку соперника из-за одиночной ошибки детектора.
@@ -508,7 +598,9 @@ class DurakGameState:
     def _set_phase(self) -> None:
         self.phase = {"pass": "throw_in", "bat": "throw_in", "yourturn": "your_turn", "ready": "ready", "itake": "defend_or_take"}.get(self.button_text, "opponent_turn")
 
-    def _apply_table_events(self, *, observed_field: set[str] | None = None) -> None:
+    def _apply_table_events(self, *, observed_field: set[str] | None = None,
+                            mine_action: str | None = None, opponent_action: str | None = None,
+                            confirmed_additional: set[str] | None = None) -> None:
         """Переносит накопленный стол по надписям игроков, не по кнопке.
 
         Состав стола сохраняется при исчезновении карт до прихода OCR-сигнала.
@@ -521,8 +613,10 @@ class DurakGameState:
         observed = self.field_cards if observed_field is None else observed_field
         observed = observed - self.out_cards
         actions = {"pass", "bat", "itake"}
-        mine = self.mine_text if self.mine_text in actions else ""
-        opponent = self.opponent_text if self.opponent_text in actions else ""
+        mine_text = self.mine_text if mine_action is None else mine_action
+        opponent_text = self.opponent_text if opponent_action is None else opponent_action
+        mine = mine_text if mine_text in actions else ""
+        opponent = opponent_text if opponent_text in actions else ""
         destinations = set()
         for actor, action, previous in (
             ("mine", mine, self._last_mine_action),
@@ -581,6 +675,8 @@ class DurakGameState:
                 # Заменяем снимок: исправленная масть/ранг не оставляет
                 # в памяти розыгрыша старую ошибочную карту.
                 self._confirmed_table = set(visible)
+        if confirmed_additional:
+            self._confirmed_table.update(confirmed_additional)
 
         if self.field_cards:
             self._last_field_cards = set(self.field_cards)

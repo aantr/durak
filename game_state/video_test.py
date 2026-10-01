@@ -2,6 +2,8 @@
 
 python -m game_state.video_test game.mp4 --fps 30 --draw-detections
 python -m game_state.video_test game.mp4 --fps 10 --no-window --output states.jsonl
+python game_state/video_test.py screenshots/20536274258562.mp4 --slow-every 10 --draw-detections \
+    --resize 1206 2622 --output screenshots/states.jsonl --overwrite
 
 Загрузка/прогрев моделей выполняются до запуска часов видео. --realtime
 возвращает ожидание кадров по реальным часам. Время распознавания учитывается

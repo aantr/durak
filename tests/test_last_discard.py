@@ -11,7 +11,7 @@ class LastDiscardTests(unittest.TestCase):
         self.values = dict(button="I take", mine="", opponent="", deque=24,
                            hand=["6C"], field=["8H", "9H"])
         self.state = DurakGameState(
-            trump="S", field_confirmation_frames=1,
+            trump="S", field_confirmation_frames=1, terminal_field_frames=1,
             detectors={key: lambda image, key=key: self.values[key] for key in self.values})
         self.frame = np.zeros((4, 4, 3), dtype=np.uint8)
 

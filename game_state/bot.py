@@ -7,6 +7,7 @@
     python -m game_state.bot --no-window
     python -m game_state.bot --suggest-moves --trump S
     python -m game_state.bot --slow-every 2 --draw-detections
+    python game_state/bot.py --mac-ip 127.0.0.1 --control-port 12004 --video-port 12005 --slow-every 10 --draw-detections --suggest-moves --mcts-ms 0 --mcts-rollouts 30000 --mcts-deals 112 --mcts-exploration 0.8 --mcts-threads 16
 
 Esc/Q или Ctrl+C — выход. R — сброс состояния партии. Клик по окну передаётся на iPhone.
 Enter включает/выключает автоигру (задержка --auto-delay, по умолчанию 1 с).
@@ -39,6 +40,7 @@ from game_state.game import DurakGameState, RANKS, SUITS, preload_models
 from game_state.engine_process import EngineProcess
 from game_state.autoplay import AutoPlay
 from game_state.move_input import execute_move
+from game_state.state_window import StateWindowRenderer
 
 if TYPE_CHECKING:
     from iphone_screen.iphone_client_v2 import IPhoneRemote
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
 
 MAC_IP = "10.10.10.1"
 WINDOW_NAME = "Durak - iPhone"
+STATE_WINDOW_NAME = "Durak - State"
 logger = logging.getLogger(__name__)
 
 
@@ -255,7 +258,8 @@ def run_bot(
     ``draw_detections`` показывает последний обработанный кадр. Разметка
     пропущенных детекторов сохраняется до их следующего запуска; пустой
     результат удаляет старую разметку. Фон всегда берётся из текущего кадра.
-    ``state_format``: pretty — панель на русском, json — исходный JSON.
+    При show_window состояние показывается в отдельной таблице с картами.
+    state_format выбирает формат консоли только при show_window=False.
     Enter переключает автоигру; auto_delay — ожидание после обнаружения своего хода.
     Автоигра использует только свежие распознавания и актуальный расчёт.
     Space/Up работают в ручном режиме. Уже отправленный ввод не прерывается.
@@ -312,6 +316,8 @@ def run_bot(
     next_update = 0.0
     last_timeout_log = float("-inf")
     window_created = False
+    state_window_created = False
+    state_renderer = StateWindowRenderer() if show_window else None
     reset_requested = False
     geometry = None
     move_pending: Future | None = None
@@ -326,7 +332,7 @@ def run_bot(
             logger.info("Сначала рассчитайте ход пробелом")
         elif move is executed_move or (current_snapshot is not None and current_snapshot == executed_snapshot):
             logger.info("Ход уже отправлен; ожидается изменение состояния")
-        elif geometry is None or current_snapshot is None or reset_requested:
+        elif geometry is None or current_snapshot is None or reset_requested or state.terminal_pending:
             logger.info("Дождитесь распознавания состояния")
         else:
             try:
@@ -347,6 +353,11 @@ def run_bot(
             window_created = True
             cv2.resizeWindow(WINDOW_NAME, 460, 900)
             cv2.setMouseCallback(WINDOW_NAME, mouse)
+            cv2.namedWindow(STATE_WINDOW_NAME, cv2.WINDOW_NORMAL)
+            state_window_created = True
+            cv2.resizeWindow(STATE_WINDOW_NAME, 1000, 850)
+            cv2.imshow(STATE_WINDOW_NAME, state_renderer.render(
+                None, auto_enabled=autoplay.enabled, auto_delay=auto_delay))
 
         if fps is None:
             logger.info("Ожидание видео iPhone; распознавание без ограничения FPS")
@@ -371,13 +382,16 @@ def run_bot(
                 if not reset_requested:
                     if draw_detections:
                         annotated_frame = state.annotated_frame
-                    current_snapshot = state_snapshot(state)
-                    observation_updated = True
-                    geometry = {
-                        "frame_size": state.frame_size,
-                        "hand_layout": [dict(item) for item in state.hand_layout],
-                        "field_layout": [dict(item) for item in state.field_layout],
-                    }
+                    if state.terminal_pending:
+                        current_snapshot = None
+                    else:
+                        current_snapshot = state_snapshot(state)
+                        observation_updated = True
+                        geometry = {
+                            "frame_size": state.frame_size,
+                            "hand_layout": [dict(item) for item in state.hand_layout],
+                            "field_layout": [dict(item) for item in state.field_layout],
+                        }
             if reset_requested and pending is None:
                 state.reset(trump=initial_trump)
                 reset_requested = False
@@ -389,14 +403,19 @@ def run_bot(
                 snapshot["last_evaluation"] = engine_process.last_evaluation
                 if recommendation is not None:
                     snapshot["recommendation"] = recommendation
-                if snapshot != previous_snapshot:
-                    if state_format == "json":
+                view_key = (snapshot, autoplay.enabled, autoplay.status if autoplay.enabled else "")
+                if view_key != previous_snapshot:
+                    if show_window:
+                        cv2.imshow(STATE_WINDOW_NAME, state_renderer.render(
+                            snapshot, auto_enabled=autoplay.enabled, auto_delay=auto_delay,
+                            auto_status=autoplay.status if autoplay.enabled else ""))
+                    elif state_format == "json":
                         logger.info("Состояние: %s", json.dumps(snapshot, ensure_ascii=False))
                     else:
                         use_color = sys.stderr.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
                         width = min(90, shutil.get_terminal_size(fallback=(80, 24)).columns)
                         logger.info("\n%s", format_state(snapshot, width=width, color=use_color))
-                    previous_snapshot = snapshot
+                    previous_snapshot = view_key
 
             try:
                 frame = iphone.get_screen(
@@ -458,7 +477,7 @@ def run_bot(
                     logger.info("Автоигра %s; задержка перед расчётом %g с",
                                 "включена" if enabled else "выключена", auto_delay)
                 if key == ord(" ") and not autoplay.enabled:
-                    if current_snapshot is None or reset_requested:
+                    if current_snapshot is None or reset_requested or state.terminal_pending:
                         logger.info("Дождитесь распознавания состояния")
                     elif engine_process.request(current_snapshot):
                         recommendation = engine_process.poll()
@@ -470,9 +489,10 @@ def run_bot(
                     move = None if recommendation is None else (
                         recommendation if recommendation.get("status") == "ok" else recommendation.get("last_move"))
                     send_move(move)
-                if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+                if (cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1
+                        or cv2.getWindowProperty(STATE_WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1):
                     break
-            if observation_updated and not reset_requested:
+            if observation_updated and not reset_requested and not state.terminal_pending:
                 autoplay.step(current_snapshot, time.monotonic(),
                               input_busy=move_pending is not None or current_snapshot == executed_snapshot,
                               execute=send_move)
@@ -480,6 +500,8 @@ def run_bot(
         logger.info("Остановка по Ctrl+C")
     finally:
         try:
+            if state_window_created:
+                cv2.destroyWindow(STATE_WINDOW_NAME)
             if window_created:
                 cv2.destroyWindow(WINDOW_NAME)
         finally:
@@ -503,9 +525,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fps", type=float, default=None, help="Ограничить частоту распознавания (5–60); по умолчанию без ограничения")
     parser.add_argument("--slow-every", type=int, default=2,
                         help="Кнопка, колода и карты: раз в N обработанных кадров; mine/opponent — каждый кадр (по умолчанию 2)")
-    parser.add_argument("--no-window", action="store_true", help="Только вывод состояния в консоль")
+    parser.add_argument("--no-window", action="store_true", help="Без окон; выводить состояние в консоль")
     parser.add_argument("--draw-detections", action="store_true", help="Вставлять размеченные кропы всех детекторов обратно в кадр")
-    parser.add_argument("--state-format", choices=("pretty", "json"), default="pretty", help="Формат состояния в консоли (по умолчанию pretty)")
+    parser.add_argument("--state-format", choices=("pretty", "json"), default="pretty", help="Формат состояния с --no-window (по умолчанию pretty)")
     parser.add_argument("--suggest-moves", action="store_true", help="Совместимость: ручной расчёт доступен по Space, автоигра включается Enter")
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Задержка после обнаружения своего хода перед авторасчётом, секунды (по умолчанию 1)")
     parser.add_argument("--trump", choices=("C", "D", "H", "S"), help="Задать козырь вручную вместо распознавания: C=крести, D=бубны, H=червы, S=пики")

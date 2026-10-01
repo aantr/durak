@@ -13,7 +13,7 @@ class OpponentMemoryTests(unittest.TestCase):
         self.values = dict(button="", mine="", opponent="", deque=12,
                            hand=["6C"], field=[])
         self.state = DurakGameState(
-            trump="S", known_opponent_cards={"AS", "KH"},
+            trump="S", known_opponent_cards={"AS", "KH"}, terminal_field_frames=1,
             detectors={key: lambda image, key=key: self.values[key] for key in self.values})
 
     def update(self, *, slow_every=1, **values):

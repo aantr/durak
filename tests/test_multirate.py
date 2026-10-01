@@ -22,7 +22,7 @@ class MultirateTests(unittest.TestCase):
 
         self.detectors = {name: Mock(side_effect=lambda _, name=name: detect(name))
                           for name in self.values}
-        self.state = DurakGameState(trump="S", detectors=self.detectors)
+        self.state = DurakGameState(trump="S", detectors=self.detectors, terminal_field_frames=1)
 
     def update(self, **values):
         self.values.update(values)

@@ -207,3 +207,6 @@ print(game.winner)  # 0 или 1
 `hand`, `known_opponent`, `opponent_count`, `deck_count`, `discard`, `table`,
 `trump`, `bottom_trump` и те же поля фазы. `_native.sample_world(observation, seed)`
 позволяет проверить генерацию допустимого полного состояния.
+
+Веса: https://drive.google.com/drive/folders/1ARb0WRHIO2hPQRw8AUr3Ki1hNRAC6LB8?usp=sharing
+

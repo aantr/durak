@@ -9,6 +9,7 @@ from typing import Any, Callable, Mapping
 import numpy as np
 
 from game_state.visualization import DetectionVisualization, draw_label
+from game_state.table_votes import TableVotes
 
 RANKS = ("6", "7", "8", "9", "10", "J", "Q", "K", "A")
 SUITS = ("C", "D", "H", "S")
@@ -329,7 +330,9 @@ class DurakGameState:
     _transferred_cards: set[str] = field(default_factory=set, init=False, repr=False)
     _table_was_empty: bool = field(default=True, init=False, repr=False)
     _confirmed_table: set[str] = field(default_factory=set, init=False, repr=False)
+    _confirmed_layout: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _table_candidate: set[str] = field(default_factory=set, init=False, repr=False)
+    _table_candidate_layout: list[dict[str, Any]] = field(default_factory=list, init=False, repr=False)
     _table_candidate_frames: int = field(default=0, init=False, repr=False)
     # Последовательные реальные наблюдения известной карты в новой зоне.
     _opponent_move_candidates: dict[tuple[str, str], int] = field(default_factory=dict, init=False, repr=False)
@@ -341,7 +344,11 @@ class DurakGameState:
     _terminal_mine_action: str = field(default="", init=False, repr=False)
     _terminal_opponent_action: str = field(default="", init=False, repr=False)
     _terminal_card_counts: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _terminal_votes: TableVotes | None = field(default=None, init=False, repr=False)
     _terminal_confirmed_before: set[str] = field(default_factory=set, init=False, repr=False)
+    _terminal_snapshot_candidate: set[str] = field(default_factory=set, init=False, repr=False)
+    _terminal_snapshot_frames: int = field(default=0, init=False, repr=False)
+    _terminal_latest_stable: set[str] | None = field(default=None, init=False, repr=False)
     _terminal_seen_cards: set[str] = field(default_factory=set, init=False, repr=False)
     _terminal_had_gap: bool = field(default=False, init=False, repr=False)
     _terminal_new_round: bool = field(default=False, init=False, repr=False)
@@ -361,6 +368,7 @@ class DurakGameState:
         self.detectors = defaults
         self._round_cards.update(self.field_cards)
         self._confirmed_table.update(self.field_cards)
+        self._confirmed_layout = [dict(item) for item in self.field_layout]
         self._refresh_opponent()
 
     def reset(self, *, trump: str | None = None) -> None:
@@ -429,6 +437,20 @@ class DurakGameState:
                 card: self._table_candidate_frames for card in self._table_candidate
             }
             self._terminal_confirmed_before = set(self._confirmed_table)
+            self._terminal_votes = TableVotes()
+            if self._confirmed_layout:
+                excluded = {item.get("card") for item in self._confirmed_layout
+                            if item.get("card") not in self._confirmed_table}
+                self._terminal_votes.add(self._confirmed_layout, weight=self.field_confirmation_frames,
+                                         frame=-2, excluded=excluded)
+            if self._table_candidate_layout and self._table_candidate != self._confirmed_table:
+                excluded = {item.get("card") for item in self._table_candidate_layout
+                            if item.get("card") not in self._table_candidate}
+                self._terminal_votes.add(self._table_candidate_layout,
+                                         weight=self._table_candidate_frames, frame=-1, excluded=excluded)
+            self._terminal_snapshot_candidate = set()
+            self._terminal_snapshot_frames = 0
+            self._terminal_latest_stable = None
             self._terminal_seen_cards = self._confirmed_table | self._table_candidate
             self._terminal_had_gap = False
             self._terminal_new_round = False
@@ -484,16 +506,38 @@ class DurakGameState:
             if not self._terminal_new_round:
                 for card in observed_field:
                     self._terminal_card_counts[card] = self._terminal_card_counts.get(card, 0) + 1
+                self._terminal_votes.add(self.field_layout, frame=self.frame_number,
+                                         excluded=self.hand_cards | self.out_cards)
+                if observed_field:
+                    if observed_field == self._terminal_snapshot_candidate:
+                        self._terminal_snapshot_frames += 1
+                    else:
+                        self._terminal_snapshot_candidate = set(observed_field)
+                        self._terminal_snapshot_frames = 1
+                    if self._terminal_snapshot_frames >= self.field_confirmation_frames:
+                        self._terminal_latest_stable = set(observed_field)
+                else:
+                    self._terminal_snapshot_candidate.clear()
+                    self._terminal_snapshot_frames = 0
                 self._terminal_seen_cards.update(observed_field)
                 if self.field_cards:
                     self._last_field_cards = set(self.field_cards)
                     self._last_field_layout = [dict(item) for item in self.field_layout]
             self._terminal_frames_left -= 1
             if self._terminal_frames_left == 0:
-                confirmed = self._terminal_confirmed_before | {
+                additional = {
                     card for card, count in self._terminal_card_counts.items()
                     if count >= self.field_confirmation_frames
                 }
+                latest = self._terminal_latest_stable
+                if latest is not None and len(latest) >= len(self._terminal_confirmed_before):
+                    confirmed = latest | (additional - self._terminal_confirmed_before)
+                else:
+                    confirmed = self._terminal_confirmed_before | additional
+                bat = self._terminal_mine_action == "bat" or self._terminal_opponent_action == "bat"
+                if self._terminal_votes.slots:
+                    confirmed = self._terminal_votes.confirmed(
+                        self.field_confirmation_frames, bat=bat, trump=self.trump)
                 new_field = set(self.field_cards) if self._terminal_new_round else set()
                 new_layout = [dict(item) for item in self.field_layout] if self._terminal_new_round else []
                 if self._terminal_new_round:
@@ -508,13 +552,17 @@ class DurakGameState:
                     observed_field=set() if self._terminal_new_round else observed_field,
                     mine_action=self._terminal_mine_action or mine_text,
                     opponent_action=self._terminal_opponent_action or opponent_text,
-                    confirmed_additional=confirmed,
+                    confirmed_override=confirmed,
                 )
                 if new_field:
                     self.field_cards = new_field
                     self.field_layout = new_layout
                 self._terminal_card_counts.clear()
+                self._terminal_votes = None
                 self._terminal_confirmed_before.clear()
+                self._terminal_latest_stable = None
+                self._terminal_snapshot_candidate.clear()
+                self._terminal_snapshot_frames = 0
                 self._terminal_seen_cards.clear()
                 self._terminal_had_gap = self._terminal_new_round = False
                 self._terminal_mine_action = self._terminal_opponent_action = ""
@@ -600,13 +648,13 @@ class DurakGameState:
 
     def _apply_table_events(self, *, observed_field: set[str] | None = None,
                             mine_action: str | None = None, opponent_action: str | None = None,
-                            confirmed_additional: set[str] | None = None) -> None:
+                            confirmed_override: set[str] | None = None) -> None:
         """Переносит накопленный стол по надписям игроков, не по кнопке.
 
         Состав стола сохраняется при исчезновении карт до прихода OCR-сигнала.
-        Для Bat берётся последний подтверждённый снимок, а не объединение
-        всех распознаваний. После Bat состав биты заморожен до нового стола
-        и исчезновения терминальных надписей. При I take можно ещё подкидывать.
+        Для Bat берутся подтверждённые позиции карт. После Bat состав биты
+        заморожен до нового стола и исчезновения терминальных надписей.
+        При I take можно ещё подкидывать.
         """
         # Даже ещё не подтверждённая карта означает непустое наблюдение стола.
         # Иначе фильтр переходов задерживал бы начало следующего розыгрыша.
@@ -671,12 +719,14 @@ class DurakGameState:
             else:
                 self._table_candidate = set(visible)
                 self._table_candidate_frames = 1 if visible else 0
+            self._table_candidate_layout = [dict(item) for item in self.field_layout]
             if self._table_candidate_frames >= self.field_confirmation_frames:
                 # Заменяем снимок: исправленная масть/ранг не оставляет
                 # в памяти розыгрыша старую ошибочную карту.
                 self._confirmed_table = set(visible)
-        if confirmed_additional:
-            self._confirmed_table.update(confirmed_additional)
+                self._confirmed_layout = [dict(item) for item in self.field_layout]
+        if confirmed_override is not None:
+            self._confirmed_table = set(confirmed_override)
 
         if self.field_cards:
             self._last_field_cards = set(self.field_cards)
@@ -728,7 +778,9 @@ class DurakGameState:
         self._round_cards.clear()
         self._transferred_cards.clear()
         self._confirmed_table.clear()
+        self._confirmed_layout.clear()
         self._table_candidate.clear()
+        self._table_candidate_layout.clear()
         self._table_candidate_frames = 0
         self._round_destination = None
         self._last_field_cards.clear()

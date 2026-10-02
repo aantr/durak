@@ -82,6 +82,92 @@ class TerminalFieldWindowTests(unittest.TestCase):
         self.assertFalse(self.state.known_opponent_cards)
         self.assertEqual(self.state.field_cards, {"8H", "9H"})
 
+    def test_bat_replaces_wrong_suit_at_same_position(self):
+        self.state.trump = "D"
+        def layout(cover):
+            return {"cards": ["6H", cover], "layout": [
+                {"card": "6H", "bbox": (10, 10, 30, 90), "covers": None},
+                {"card": cover, "bbox": (80, 15, 100, 95), "covers": 0},
+            ]}
+        self.values["field"] = layout("JH")
+        self.state.update(self.frame)
+        self.state.update(self.frame)
+        self.assertEqual(self.state._confirmed_table, {"6H", "JH"})
+        self.update(mine="Bat", field=layout("JD"))
+        for _ in range(TERMINAL_FIELD_FRAMES - 1):
+            self.update(field=layout("JD"))
+        self.assertEqual(self.state.out_cards, {"6H", "JD"})
+        self.assertNotIn("JH", self.state.out_cards)
+
+    def test_bat_rejects_illegal_cover_with_geometry(self):
+        self.state.trump = "D"
+        observed = {"cards": ["6H", "7S"], "layout": [
+            {"card": "6H", "bbox": (10, 10, 30, 90), "covers": None},
+            {"card": "7S", "bbox": (80, 15, 100, 95), "covers": 0},
+        ]}
+        self.values["field"] = observed
+        self.state.update(self.frame)
+        self.state.update(self.frame)
+        self.update(mine="Bat")
+        for _ in range(TERMINAL_FIELD_FRAMES - 1):
+            self.update()
+        self.assertFalse(self.state.out_cards)
+
+    def test_late_stable_correction_replaces_earlier_majority(self):
+        self.state.trump = "D"
+        def layout(cover):
+            return {"cards": ["6H", cover], "layout": [
+                {"card": "6H", "bbox": (10, 10, 30, 90), "covers": None},
+                {"card": cover, "bbox": (80, 15, 100, 95), "covers": 0},
+            ]}
+        self.values["field"] = layout("JH")
+        self.state.update(self.frame)
+        self.state.update(self.frame)
+        self.update(mine="Bat")
+        self.update()
+        self.update()
+        self.update(field=layout("JD"))
+        self.update(field=layout("JD"))
+        self.assertEqual(self.state.out_cards, {"6H", "JD"})
+
+    def test_bat_includes_late_confirmed_pair(self):
+        self.state.trump = "D"
+        first = [
+            {"card": "6H", "bbox": (10, 10, 30, 90), "covers": None},
+            {"card": "JH", "bbox": (80, 15, 100, 95), "covers": 0},
+        ]
+        second = [
+            {"card": "8S", "bbox": (210, 10, 230, 90), "covers": None},
+            {"card": "9S", "bbox": (280, 15, 300, 95), "covers": 2},
+        ]
+        self.values["field"] = {"cards": ["6H", "JH"], "layout": first}
+        self.state.update(self.frame)
+        self.state.update(self.frame)
+        self.update(mine="Bat")
+        self.update()
+        self.update()
+        full = {"cards": ["6H", "JH", "8S", "9S"], "layout": first + second}
+        self.update(field=full)
+        self.update(field=full)
+        self.assertEqual(self.state.out_cards, {"6H", "JH", "8S", "9S"})
+
+    def test_new_round_can_reuse_same_table_positions(self):
+        def layout(attack, cover):
+            return {"cards": [attack, cover], "layout": [
+                {"card": attack, "bbox": (10, 10, 30, 90), "covers": None},
+                {"card": cover, "bbox": (80, 15, 100, 95), "covers": 0},
+            ]}
+        self.values["field"] = layout("6H", "7H")
+        self.state.update(self.frame)
+        self.state.update(self.frame)
+        self.update(mine="Bat")
+        self.update(mine="", field=[])
+        self.update(field=layout("8H", "9H"))
+        self.update()
+        self.update()
+        self.assertEqual(self.state.out_cards, {"6H", "7H"})
+        self.assertEqual(self.state.field_cards, {"8H", "9H"})
+
     def test_reset_discards_window_and_keeps_limit(self):
         self.update(mine="Bat")
         self.assertTrue(self.state.terminal_pending)

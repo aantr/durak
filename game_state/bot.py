@@ -310,6 +310,7 @@ def run_bot(
 
     worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="durak-state")
     pending: Future | None = None
+    pending_frame = None
     previous_snapshot = None
     current_snapshot = None
     recommendation = None
@@ -391,7 +392,7 @@ def run_bot(
                         annotated_frame = state.annotated_frame
                     detected_snapshot = state_snapshot(state)
                     if recognition_log is not None:
-                        recognition_log.record(state, detected_snapshot)
+                        recognition_log.record(state, detected_snapshot, frame=pending_frame)
                     if state.terminal_pending:
                         current_snapshot = None
                     else:
@@ -402,6 +403,7 @@ def run_bot(
                             "hand_layout": [dict(item) for item in state.hand_layout],
                             "field_layout": [dict(item) for item in state.field_layout],
                         }
+                pending_frame = None
             if reset_requested and pending is None:
                 state.reset(trump=initial_trump)
                 reset_requested = False
@@ -448,7 +450,8 @@ def run_bot(
                 if pending is None and now >= next_update:
                     # Передаём отдельный BGR-кадр; отображение и декодер
                     # не могут изменить изображение во время распознавания.
-                    pending = worker.submit(update_state, frame.copy())
+                    pending_frame = frame.copy()
+                    pending = worker.submit(update_state, pending_frame)
                     last_processed_frame = frame
                     next_update = now + 1.0 / fps if fps is not None else 0.0
 
@@ -521,7 +524,7 @@ def run_bot(
                 if pending is not None and not pending.cancelled():
                     pending.result()
                     if recognition_log is not None and not reset_requested:
-                        recognition_log.record(state, state_snapshot(state))
+                        recognition_log.record(state, state_snapshot(state), frame=pending_frame)
             finally:
                 try:
                     engine_process.close()

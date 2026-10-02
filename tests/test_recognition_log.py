@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
+import cv2
 import numpy as np
 
 from game_state.bot import run_bot, state_snapshot
@@ -29,9 +30,14 @@ class RecognitionLogTests(unittest.TestCase):
             state.field_cards.add("6H")
             state.field_layout = [{"card": "6H", "covers": None,
                                    "bbox": (1, 2, 3, 4), "confidence": 0.91}]
-            self.assertTrue(journal.record(state, state_snapshot(state)))
+            frame = np.zeros((8, 8, 3), dtype=np.uint8)
+            with patch.dict("game_state.recognition_log.CROP_FIELD", {(8, 8): (1, 2, 7, 6)}):
+                self.assertTrue(journal.record(state, state_snapshot(state), frame=frame))
             journal.close()
             records = [json.loads(line) for line in path.read_text().splitlines()]
+            field_image = path.parent / records[1]["field_image"]
+            self.assertTrue(field_image.is_file())
+            self.assertEqual(cv2.imread(str(field_image)).shape[:2], (4, 6))
 
         self.assertEqual(len(records), 2)
         self.assertEqual([item["frame"] for item in records], [1, 3])
@@ -39,12 +45,14 @@ class RecognitionLogTests(unittest.TestCase):
         self.assertEqual(records[1]["state"]["field_cards"], ["6H"])
         self.assertEqual(records[1]["detection"]["field_layout"][0]["confidence"], 0.91)
         self.assertEqual(records[1]["frame_size"], [200, 100])
+        self.assertEqual(records[1]["field_image_region"], [1, 2, 7, 6])
         self.assertEqual(records[0]["session"], records[1]["session"])
 
     def test_bot_writes_changes_without_recommendation_noise(self):
-        frame = np.zeros((4, 4, 3), dtype=np.uint8)
+        frames = [np.full((4, 4, 3), value, dtype=np.uint8)
+                  for value in (0, 40, 80, 120)]
         iphone = Mock()
-        iphone.get_screen.side_effect = [frame, frame, frame, frame, KeyboardInterrupt()]
+        iphone.get_screen.side_effect = [*frames, KeyboardInterrupt()]
         state = DurakGameState(trump="S")
         updates = 0
 
@@ -56,6 +64,9 @@ class RecognitionLogTests(unittest.TestCase):
             state._terminal_frames_left = 1 if updates == 1 else 0
             if updates == 3:
                 state.hand_cards.add("6H")
+                state.field_cards.add("7H")
+                state.field_layout = [{"card": "7H", "bbox": (0, 0, 4, 4),
+                                       "covers": None}]
 
         state.update = Mock(side_effect=update)
 
@@ -76,6 +87,8 @@ class RecognitionLogTests(unittest.TestCase):
                 run_bot(iphone, state=state, show_window=False, engine_options={},
                         recognition_log_path=path)
             records = [json.loads(line) for line in path.read_text().splitlines()]
+            image = cv2.imread(str(path.parent / records[1]["field_image"]))
+            self.assertEqual(int(image[1, 1, 0]), 80)
 
         self.assertEqual(len(records), 2)
         self.assertEqual([item["frame"] for item in records], [1, 3])

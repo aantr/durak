@@ -40,6 +40,7 @@ from game_state.game import DurakGameState, RANKS, SUITS, preload_models
 from game_state.engine_process import EngineProcess
 from game_state.autoplay import AutoPlay
 from game_state.move_input import execute_move
+from game_state.recognition_log import DEFAULT_RECOGNITION_LOG, RecognitionChangeLog
 from game_state.state_window import StateWindowRenderer
 
 if TYPE_CHECKING:
@@ -245,6 +246,7 @@ def run_bot(
     engine: DurakEngine | None = None,
     engine_options: dict | None = None,
     auto_delay: float = 1.0,
+    recognition_log_path: str | Path | None = None,
 ) -> DurakGameState:
     """Читает новые кадры до Esc/Q, закрытия окна или Ctrl+C.
 
@@ -260,6 +262,7 @@ def run_bot(
     результат удаляет старую разметку. Фон всегда берётся из текущего кадра.
     При show_window состояние показывается в отдельной таблице с картами.
     state_format выбирает формат консоли только при show_window=False.
+    recognition_log_path записывает только изменившиеся состояния в JSONL.
     Enter переключает автоигру; auto_delay — ожидание после обнаружения своего хода.
     Автоигра использует только свежие распознавания и актуальный расчёт.
     Space/Up работают в ручном режиме. Уже отправленный ввод не прерывается.
@@ -318,6 +321,7 @@ def run_bot(
     window_created = False
     state_window_created = False
     state_renderer = StateWindowRenderer() if show_window else None
+    recognition_log = None
     reset_requested = False
     geometry = None
     move_pending: Future | None = None
@@ -348,14 +352,17 @@ def run_bot(
                 logger.exception("Не удалось поставить ход в очередь")
 
     try:
+        if recognition_log_path is not None:
+            recognition_log = RecognitionChangeLog(recognition_log_path)
+            logger.info("Журнал распознавания: %s", recognition_log.path)
         if show_window:
             cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
             window_created = True
-            cv2.resizeWindow(WINDOW_NAME, 460, 900)
+            cv2.resizeWindow(WINDOW_NAME, int(460 * 1.5), int(900 * 1.5))
             cv2.setMouseCallback(WINDOW_NAME, mouse)
             cv2.namedWindow(STATE_WINDOW_NAME, cv2.WINDOW_NORMAL)
             state_window_created = True
-            cv2.resizeWindow(STATE_WINDOW_NAME, 1000, 850)
+            cv2.resizeWindow(STATE_WINDOW_NAME, int(1000 * 1.5), int(850 * 1.5))
             cv2.imshow(STATE_WINDOW_NAME, state_renderer.render(
                 None, auto_enabled=autoplay.enabled, auto_delay=auto_delay))
 
@@ -382,10 +389,13 @@ def run_bot(
                 if not reset_requested:
                     if draw_detections:
                         annotated_frame = state.annotated_frame
+                    detected_snapshot = state_snapshot(state)
+                    if recognition_log is not None:
+                        recognition_log.record(state, detected_snapshot)
                     if state.terminal_pending:
                         current_snapshot = None
                     else:
-                        current_snapshot = state_snapshot(state)
+                        current_snapshot = detected_snapshot
                         observation_updated = True
                         geometry = {
                             "frame_size": state.frame_size,
@@ -508,12 +518,16 @@ def run_bot(
             # Активный update завершается до возврата объекта state.
             try:
                 worker.shutdown(wait=True, cancel_futures=True)
+                if pending is not None and not pending.cancelled():
+                    pending.result()
+                    if recognition_log is not None and not reset_requested:
+                        recognition_log.record(state, state_snapshot(state))
             finally:
-                engine_process.close()
-
-    # Не теряем ошибку распознавания, завершившегося одновременно с выходом.
-    if pending is not None and not pending.cancelled():
-        pending.result()
+                try:
+                    engine_process.close()
+                finally:
+                    if recognition_log is not None:
+                        recognition_log.close()
     return state
 
 
@@ -528,6 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-window", action="store_true", help="Без окон; выводить состояние в консоль")
     parser.add_argument("--draw-detections", action="store_true", help="Вставлять размеченные кропы всех детекторов обратно в кадр")
     parser.add_argument("--state-format", choices=("pretty", "json"), default="pretty", help="Формат состояния с --no-window (по умолчанию pretty)")
+    parser.add_argument("--recognition-log", type=Path, default=DEFAULT_RECOGNITION_LOG,
+                        help="JSONL-журнал изменений распознанного состояния (по умолчанию logs/recognition.jsonl)")
     parser.add_argument("--suggest-moves", action="store_true", help="Совместимость: ручной расчёт доступен по Space, автоигра включается Enter")
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Задержка после обнаружения своего хода перед авторасчётом, секунды (по умолчанию 1)")
     parser.add_argument("--trump", choices=("C", "D", "H", "S"), help="Задать козырь вручную вместо распознавания: C=крести, D=бубны, H=червы, S=пики")
@@ -570,7 +586,8 @@ def main(argv: list[str] | None = None) -> int:
             video_port=args.video_port,
         ) as iphone:
             run_bot(iphone, state=DurakGameState(trump=args.trump), fps=args.fps, show_window=not args.no_window, draw_detections=args.draw_detections,
-                    state_format=args.state_format, engine_options=engine_options, slow_every=args.slow_every, auto_delay=args.auto_delay)
+                    state_format=args.state_format, engine_options=engine_options, slow_every=args.slow_every,
+                    auto_delay=args.auto_delay, recognition_log_path=args.recognition_log)
     except KeyboardInterrupt:
         logger.info("Остановка по Ctrl+C")
     except Exception:

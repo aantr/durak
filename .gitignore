@@ -8,3 +8,4 @@ runs
 devicekit-python
 selfIdentity.plist
 export_runs
+logs/

@@ -6,6 +6,7 @@
     python -m game_state.bot --draw-detections
     python -m game_state.bot --no-window
     python -m game_state.bot --suggest-moves --trump S
+    python -m game_state.bot --bc-checkpoint runs/bc/best.pt
     python -m game_state.bot --slow-every 2 --draw-detections
     python game_state/bot.py --mac-ip 127.0.0.1 --control-port 12004 --video-port 12005 --slow-every 10 --draw-detections --suggest-moves --mcts-ms 0 --mcts-rollouts 30000 --mcts-deals 112 --mcts-exploration 0.8 --mcts-threads 16
 
@@ -162,9 +163,13 @@ def format_state(snapshot: dict, *, width: int = 80, color: bool = False) -> str
             else:
                 description = "Взять карты"
             status = "Готово" if recommendation.get("status") == "ok" else recommendation["reason"]
-            prefix = "MCTS: " if recommendation.get("status") == "ok" else "Предыдущий ход: "
+            engine_label = "BC" if move.get("engine") == "bc" else "MCTS"
+            prefix = engine_label + ": " if recommendation.get("status") == "ok" else "Предыдущий ход: "
             row(prefix + description + " | " + status)
-            row(f"{move['iterations']} симуляций · {move['elapsed_ms']:.0f} мс")
+            if move.get("engine") == "bc":
+                row(f"Вероятность хода по BC: {move['policy_probability']:.1%} · {move['elapsed_ms']:.0f} мс")
+            else:
+                row(f"{move['iterations']} симуляций · {move['elapsed_ms']:.0f} мс")
             if "threads" in move:
                 details = f"Потоки: {move['threads']} · exploration: {move['exploration']:.3g}"
                 if move.get("search_mode") == "determinized":
@@ -172,7 +177,7 @@ def format_state(snapshot: dict, *, width: int = 80, color: bool = False) -> str
                                 f" · rollouts: {move['rollouts']}")
                 row(details)
         else:
-            row("MCTS: " + recommendation["reason"])
+            row("Подсказка: " + recommendation["reason"])
     separator()
     unknown = snapshot["unknown_opponent_cards"]
     row(f"Неустановленные карты [{len(unknown)}] · колода / соперник")
@@ -551,6 +556,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Задержка после обнаружения своего хода перед авторасчётом, секунды (по умолчанию 1)")
     parser.add_argument("--trump", choices=("C", "D", "H", "S"), help="Задать козырь вручную вместо распознавания: C=крести, D=бубны, H=червы, S=пики")
     parser.add_argument("--trump-card", help="Известная нижняя карта колоды, например 6S")
+    parser.add_argument("--bc-checkpoint", type=Path, help="Выбирать ходы BC-моделью из .pt вместо MCTS")
+    parser.add_argument("--bc-device", default="cpu", help="Устройство BC-модели: cpu, cuda или cuda:0")
     parser.add_argument("--mcts-ms", type=float, default=250, help="Бюджет поиска в мс (0 — только лимит итераций)")
     parser.add_argument("--mcts-iterations", type=int, default=3000, help="Максимум симуляций MCTS на состояние")
     parser.add_argument("--mcts-rollouts", type=int, help="Включить поиск по раскладам: итераций на каждый расклад (заменяет --mcts-iterations)")
@@ -564,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--auto-delay должен быть конечным числом >= 0")
     if args.slow_every < 1:
         parser.error("--slow-every должен быть >= 1")
+    if args.bc_checkpoint is not None and not args.bc_checkpoint.is_file():
+        parser.error(f"Checkpoint BC не найден: {args.bc_checkpoint}")
     from game_engine.game_engine import validate_search_options
     try:
         validate_search_options(iterations=args.mcts_iterations, time_limit_ms=args.mcts_ms,
@@ -578,6 +587,10 @@ def main(argv: list[str] | None = None) -> int:
                               iterations=args.mcts_iterations, time_limit_ms=args.mcts_ms,
                               rollouts=args.mcts_rollouts, deals=args.mcts_deals,
                               exploration=args.mcts_exploration, threads=args.mcts_threads)
+        if args.bc_checkpoint is not None:
+            engine_options = dict(bc_checkpoint=str(args.bc_checkpoint.resolve()),
+                                  device=args.bc_device, trump=args.trump, bottom_trump=args.trump_card)
+            logger.info("Ходы выбирает BC: %s (%s)", args.bc_checkpoint, args.bc_device)
         from iphone_screen.iphone_client_v2 import IPhoneRemote
 
         logger.info("Загрузка и прогрев моделей распознавания...")

@@ -11,8 +11,14 @@ _engine = None
 
 def _initialize_engine(options):
     global _engine
-    from game_engine import DurakEngine
-    _engine = DurakEngine(**options)
+    options = dict(options)
+    checkpoint = options.pop("bc_checkpoint", None)
+    if checkpoint is not None:
+        from behaviour_cloning import BehaviourCloningEngine
+        _engine = BehaviourCloningEngine(checkpoint, **options)
+    else:
+        from game_engine import DurakEngine
+        _engine = DurakEngine(**options)
 
 
 def _suggest(snapshot):
@@ -69,6 +75,8 @@ class EngineProcess:
                     value = moves[0].get("value") if moves else None
                     if isinstance(value, (int, float)) and math.isfinite(value):
                         self.last_evaluation = value
+                    elif result.get("value_kind") == "policy_probability":
+                        self.last_evaluation = None
                 self.recommendation = result
         result = self.recommendation
         if result is None:

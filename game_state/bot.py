@@ -605,14 +605,15 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("Ходы выбирает IQL: %s (%s)", args.iql_checkpoint, args.iql_device)
         from iphone_screen.iphone_client_v2 import IPhoneRemote
 
-        logger.info("Загрузка и прогрев моделей распознавания...")
-        preload_models()
-        logger.info("Модели готовы; подключение к iPhone")
+        logger.info("Подключение к iPhone...")
         with IPhoneRemote(
             mac_ip=args.mac_ip,
             control_port=args.control_port,
             video_port=args.video_port,
         ) as iphone:
+            logger.info("Подключение к iPhone установлено; загрузка и прогрев моделей распознавания...")
+            preload_models()
+            logger.info("Модели готовы")
             run_bot(iphone, state=DurakGameState(trump=args.trump), fps=args.fps, show_window=not args.no_window, draw_detections=args.draw_detections,
                     state_format=args.state_format, engine_options=engine_options, slow_every=args.slow_every,
                     auto_delay=args.auto_delay, recognition_log_path=args.recognition_log)

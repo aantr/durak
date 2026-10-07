@@ -1,6 +1,13 @@
 """Генерация JSON-партий существующим C++ движком и ансамблем стратегий.
 
 python generate_games_dataset.py --games 100 --strategies random:1 heuristic:2 greedy:1 mcts:4
+python generate_games_dataset.py \
+  --games 1000 \
+  --seed 10000 \
+  --workers 4 \
+  --iterations 3000 \
+  --rollout-depth 256 \
+  --strategies random:1 heuristic:2 greedy:1 mcts:4
 """
 
 from __future__ import annotations

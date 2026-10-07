@@ -13,7 +13,13 @@ def _initialize_engine(options):
     global _engine
     options = dict(options)
     checkpoint = options.pop("bc_checkpoint", None)
-    if checkpoint is not None:
+    iql_checkpoint = options.pop("iql_checkpoint", None)
+    if checkpoint is not None and iql_checkpoint is not None:
+        raise ValueError("Выберите один checkpoint: BC или IQL")
+    if iql_checkpoint is not None:
+        from offline_iql import IQLEngine
+        _engine = IQLEngine(iql_checkpoint, **options)
+    elif checkpoint is not None:
         from behaviour_cloning import BehaviourCloningEngine
         _engine = BehaviourCloningEngine(checkpoint, **options)
     else:

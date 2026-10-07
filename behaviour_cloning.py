@@ -272,7 +272,7 @@ class BehaviourCloningPolicy(nn.Module):
     def pool(encoded, mask):
         return (encoded * mask.unsqueeze(-1)).sum(-2) / mask.sum(-1, keepdim=True).clamp_min(1)
 
-    def forward(self, batch):
+    def state_features(self, batch):
         trump = batch["trump"]
         sets = self.pool(self.embed_cards(batch["cards"], trump), batch["cards"] != PAD_CARD).flatten(1)
         pairs = self.table_encoder(self.embed_cards(batch["table"], trump).flatten(-2))
@@ -284,8 +284,11 @@ class BehaviourCloningPolicy(nn.Module):
         lengths = batch["history_length"]
         history_vector = outputs[torch.arange(len(lengths), device=lengths.device), (lengths - 1).clamp_min(0)]
         history_vector = history_vector * (lengths > 0).unsqueeze(-1)
-        state = self.state_encoder(torch.cat((sets, table, history_vector, batch["context"]), dim=-1))
-        actions = self.embed_actions(batch["actions"], trump)
+        return self.state_encoder(torch.cat((sets, table, history_vector, batch["context"]), dim=-1))
+
+    def forward(self, batch):
+        state = self.state_features(batch)
+        actions = self.embed_actions(batch["actions"], batch["trump"])
         scores = self.policy_head(torch.cat((state.unsqueeze(1).expand(-1, actions.size(1), -1), actions), dim=-1)).squeeze(-1)
         return scores.masked_fill(~batch["action_mask"], -torch.inf)
 
@@ -357,6 +360,8 @@ def load_policy(path, device="cpu"):
 class BehaviourCloningEngine:
     """Адаптер BC для фонового процесса live-бота, с тем же протоколом подсказок."""
 
+    engine_name = "bc"
+
     def __init__(self, checkpoint, *, device="cpu", trump=None, bottom_trump=None):
         torch.set_num_threads(2)
         self.policy = load_policy(checkpoint, device)
@@ -368,11 +373,11 @@ class BehaviourCloningEngine:
 
         phase = _phase(state)
         if phase in ("ready", "opponent_turn"):
-            return {"status": "waiting", "action": None, "engine": "bc",
+            return {"status": "waiting", "action": None, "engine": self.engine_name,
                     "reason": "Игра ещё не началась" if phase == "ready" else "Ход соперника"}
         trump = self.trump or _get(state, "trump")
         if trump not in ("C", "D", "H", "S"):
-            return {"status": "waiting", "action": None, "engine": "bc",
+            return {"status": "waiting", "action": None, "engine": self.engine_name,
                     "reason": "Козырь ещё не распознан"}
         start = perf_counter()
         observation = observation_from_state(state, trump=trump, bottom_trump=self.bottom_trump)
@@ -384,7 +389,7 @@ class BehaviourCloningEngine:
             elif action["type"] == "pass":
                 button = _text(_get(state, "button_text", _get(state, "button", "")))
                 action["button"] = "Bat" if button == "bat" else "Pass"
-        result["engine"] = "bc"
+        result["engine"] = self.engine_name
         result["elapsed_ms"] = (perf_counter() - start) * 1000
         result["policy_probability"] = next(
             move["probability"] for move in result["moves"]

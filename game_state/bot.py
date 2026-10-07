@@ -1,16 +1,19 @@
 """Получение экрана iPhone и обновление состояния игры.
 
-Запуск из корня проекта::
+Запуск из корня проекта:
 
     python -m game_state.bot --mac-ip 10.10.10.1 --fps 10
     python -m game_state.bot --draw-detections
     python -m game_state.bot --no-window
     python -m game_state.bot --suggest-moves --trump S
     python -m game_state.bot --bc-checkpoint runs/bc/best.pt
+    python -m game_state.bot --iql-checkpoint runs/iql/last.pt
     python -m game_state.bot --slow-every 2 --draw-detections
     python game_state/bot.py --mac-ip 127.0.0.1 --control-port 12004 --video-port 12005 --slow-every 10 --draw-detections --suggest-moves --mcts-ms 0 --mcts-rollouts 30000 --mcts-deals 112 --mcts-exploration 0.8 --mcts-threads 16
+    python game_state/bot.py --mac-ip 127.0.0.1 --control-port 12004 --video-port 12005 --slow-every 10 --draw-detections --suggest-moves --bc-checkpoint runs/bc_scores/best.pt --bc-device cuda
+    python game_state/bot.py --mac-ip 127.0.0.1 --control-port 12004 --video-port 12005 --slow-every 10 --draw-detections --suggest-moves --iql-checkpoint runs/iql/best.pt --iql-device cuda
 
-Esc/Q или Ctrl+C — выход. R — сброс состояния партии. Клик по окну передаётся на iPhone.
+    Esc/Q или Ctrl+C — выход. R — сброс состояния партии. Клик по окну передаётся на iPhone.
 Enter включает/выключает автоигру (задержка --auto-delay, по умолчанию 1 с).
 В ручном режиме Space рассчитывает ход, ↑ выполняет последний рассчитанный ход.
 """
@@ -163,11 +166,11 @@ def format_state(snapshot: dict, *, width: int = 80, color: bool = False) -> str
             else:
                 description = "Взять карты"
             status = "Готово" if recommendation.get("status") == "ok" else recommendation["reason"]
-            engine_label = "BC" if move.get("engine") == "bc" else "MCTS"
+            engine_label = {"bc": "BC", "iql": "IQL"}.get(move.get("engine"), "MCTS")
             prefix = engine_label + ": " if recommendation.get("status") == "ok" else "Предыдущий ход: "
             row(prefix + description + " | " + status)
-            if move.get("engine") == "bc":
-                row(f"Вероятность хода по BC: {move['policy_probability']:.1%} · {move['elapsed_ms']:.0f} мс")
+            if move.get("engine") in ("bc", "iql"):
+                row(f"Вероятность хода по {engine_label}: {move['policy_probability']:.1%} · {move['elapsed_ms']:.0f} мс")
             else:
                 row(f"{move['iterations']} симуляций · {move['elapsed_ms']:.0f} мс")
             if "threads" in move:
@@ -556,8 +559,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--auto-delay", type=float, default=1.0, help="Задержка после обнаружения своего хода перед авторасчётом, секунды (по умолчанию 1)")
     parser.add_argument("--trump", choices=("C", "D", "H", "S"), help="Задать козырь вручную вместо распознавания: C=крести, D=бубны, H=червы, S=пики")
     parser.add_argument("--trump-card", help="Известная нижняя карта колоды, например 6S")
-    parser.add_argument("--bc-checkpoint", type=Path, help="Выбирать ходы BC-моделью из .pt вместо MCTS")
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument("--bc-checkpoint", type=Path, help="Выбирать ходы BC-моделью из .pt вместо MCTS")
+    checkpoint_group.add_argument("--iql-checkpoint", type=Path, help="Выбирать ходы offline IQL-моделью из .pt")
     parser.add_argument("--bc-device", default="cpu", help="Устройство BC-модели: cpu, cuda или cuda:0")
+    parser.add_argument("--iql-device", default="cpu", help="Устройство IQL-модели: cpu, cuda или cuda:0")
     parser.add_argument("--mcts-ms", type=float, default=250, help="Бюджет поиска в мс (0 — только лимит итераций)")
     parser.add_argument("--mcts-iterations", type=int, default=3000, help="Максимум симуляций MCTS на состояние")
     parser.add_argument("--mcts-rollouts", type=int, help="Включить поиск по раскладам: итераций на каждый расклад (заменяет --mcts-iterations)")
@@ -573,6 +579,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--slow-every должен быть >= 1")
     if args.bc_checkpoint is not None and not args.bc_checkpoint.is_file():
         parser.error(f"Checkpoint BC не найден: {args.bc_checkpoint}")
+    if args.iql_checkpoint is not None and not args.iql_checkpoint.is_file():
+        parser.error(f"Checkpoint IQL не найден: {args.iql_checkpoint}")
     from game_engine.game_engine import validate_search_options
     try:
         validate_search_options(iterations=args.mcts_iterations, time_limit_ms=args.mcts_ms,
@@ -591,6 +599,10 @@ def main(argv: list[str] | None = None) -> int:
             engine_options = dict(bc_checkpoint=str(args.bc_checkpoint.resolve()),
                                   device=args.bc_device, trump=args.trump, bottom_trump=args.trump_card)
             logger.info("Ходы выбирает BC: %s (%s)", args.bc_checkpoint, args.bc_device)
+        elif args.iql_checkpoint is not None:
+            engine_options = dict(iql_checkpoint=str(args.iql_checkpoint.resolve()),
+                                  device=args.iql_device, trump=args.trump, bottom_trump=args.trump_card)
+            logger.info("Ходы выбирает IQL: %s (%s)", args.iql_checkpoint, args.iql_device)
         from iphone_screen.iphone_client_v2 import IPhoneRemote
 
         logger.info("Загрузка и прогрев моделей распознавания...")
